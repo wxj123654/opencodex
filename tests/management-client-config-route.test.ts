@@ -12,6 +12,7 @@ import {
   type ExportModel,
   type OpencodeGeneratedConfig,
   type PiGeneratedConfig,
+  type ZcodeGeneratedConfig,
 } from "../src/clients/config-export";
 import type { OcxConfig } from "../src/types";
 import { catalogConvergenceFactory } from "./helpers/catalog-convergence";
@@ -67,6 +68,8 @@ function baseConfig(overrides: Partial<OcxConfig> = {}): OcxConfig {
         liveModels: false,
         models: ["m1", "m2"],
         modelContextWindows: { m1: 128_000 },
+        modelReasoningEfforts: { m1: ["low", "high"] },
+        modelDefaultReasoningEfforts: { m1: "high" },
       },
       b: {
         adapter: "openai-chat",
@@ -203,6 +206,30 @@ describe("GET /api/client-config", () => {
       xhigh: "xhigh",
       max: "max",
     });
+  }, 15_000);
+
+  test("ZCode response preserves management reasoning metadata", async () => {
+    const response = await clientConfigApi(baseConfig(), "?client=zcode");
+    expect(response.status).toBe(200);
+    const body = await response.json() as ClientConfigEnvelope;
+    expect(body.filename).toBe("config.json");
+    expect(body.format).toBe("json");
+    expect(JSON.parse(body.text)).toEqual(body.config);
+
+    const provider = (body.config as ZcodeGeneratedConfig).provider[OPENCODE_PROVIDER_ID]!;
+    const native = provider.models["gpt-5.6-luna"]!;
+    expect(native.reasoning).toEqual({
+      enabled: true,
+      levels: ["low", "medium", "high", "xhigh", "max"],
+      defaultLevel: "medium",
+    });
+    const apiKeyModel = provider.models["a/m1"]!;
+    expect(apiKeyModel.reasoning).toEqual({
+      enabled: true,
+      levels: ["low", "high"],
+      defaultLevel: "high",
+    });
+    expect(JSON.stringify(body.config)).not.toContain(REAL_LOOKING_KEY);
   }, 15_000);
 
   test("counts describe the emitted document, including models without limits", async () => {

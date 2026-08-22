@@ -895,13 +895,20 @@ export interface McodeGeneratedConfig {
 
 /**
  * ZCode's `~/.zcode/v2/config.json` provider entry (observed schema, validated
- * live against ZCode 3.7.7). `kind: "anthropic"` selects the Anthropic
- * Messages protocol, which the proxy serves at `/v1/messages`. `apiKeyRequired`
- * keeps ZCode's UI from prompting for a key it does not need on loopback; the
- * serialized key is always the non-secret loopback placeholder.
+ * live against the ZCode 3.x desktop client). `kind: "anthropic"` selects the
+ * Anthropic Messages protocol, which the proxy serves at `/v1/messages`.
+ * `reasoning.levels` and `reasoning.defaultLevel` are the model-level effort
+ * fields used by the current ZCode catalog. `apiKeyRequired` keeps ZCode's UI
+ * from prompting for a key it does not need on loopback; the serialized key is
+ * always the non-secret loopback placeholder.
  */
 export interface ZcodeModelEntry {
   name?: string;
+  reasoning?: {
+    enabled: true;
+    levels: string[];
+    defaultLevel?: string;
+  };
   limit?: { context: number; output?: number };
   modalities: { input: string[]; output: string[] };
 }
@@ -1264,14 +1271,31 @@ function buildMcodeClientConfig(ctx: ExportContext): McodeGeneratedConfig {
  * without `limit` rather than guessing. Modalities are ZCode's observed
  * `text`-floor vocabulary; image-capable rows advertise image input.
  */
+function zcodeReasoning(model: ExportModel): ZcodeModelEntry["reasoning"] | undefined {
+  const levels: string[] = [];
+  for (const raw of model.reasoningEfforts ?? []) {
+    const level = raw.trim().toLowerCase();
+    if (level.length > 0 && !levels.includes(level)) levels.push(level);
+  }
+  if (levels.length === 0) return undefined;
+  const defaultLevel = model.defaultReasoningEffort?.trim().toLowerCase();
+  return {
+    enabled: true,
+    levels,
+    ...(defaultLevel && levels.includes(defaultLevel) ? { defaultLevel } : {}),
+  };
+}
+
 function buildZcodeClientConfig(ctx: ExportContext): ZcodeGeneratedConfig {
   const models: Record<string, ZcodeModelEntry> = {};
   for (const model of normalizeExportModels(ctx.models)) {
     const input = inputModalitiesForClient("pi", model.inputModalities);
     if (input === null) continue;
+    const reasoning = zcodeReasoning(model);
     const entry: ZcodeModelEntry = {
       name: exportModelLabel(model),
       modalities: { input, output: ["text"] },
+      ...(reasoning ? { reasoning } : {}),
     };
     // `limit.context` follows the authoritative-window rule. `output` is
     // deliberately absent: ZCode's schema makes it optional and we have no

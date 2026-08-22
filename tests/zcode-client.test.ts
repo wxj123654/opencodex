@@ -22,7 +22,7 @@ const CONFIG = {
   providers: { mock: { adapter: "openai-chat", baseUrl: "http://127.0.0.1/v1" } },
 } as OcxConfig;
 
-function context(): ExportContext {
+function context(extra: Partial<ExportContext> = {}): ExportContext {
   return {
     baseUrl: "http://127.0.0.1:10100/v1",
     config: CONFIG,
@@ -34,6 +34,7 @@ function context(): ExportContext {
       // Audio-only cannot be represented in ZCode's text/image vocabulary: dropped.
       { namespaced: "zenmux/audio-only", provider: "zenmux", id: "audio-only", inputModalities: ["audio"] },
     ],
+    ...extra,
   };
 }
 
@@ -67,6 +68,46 @@ describe("ZCode client config", () => {
     expect(models["xai/grok-5"]!.modalities).toEqual({ input: ["text"], output: ["text"] });
     // No authoritative window: no limit field at all, never a guessed one.
     expect(models["mystery/model"]).not.toHaveProperty("limit");
+  });
+
+  test("exports ZCode reasoning levels and validates the default", () => {
+    const document = buildClientConfig("zcode", context({
+      models: [
+        {
+          namespaced: "a/reasoning",
+          provider: "a",
+          id: "reasoning",
+          reasoningEfforts: [" HIGH ", "low", "high", "medium"],
+          defaultReasoningEffort: " HIGH ",
+        },
+        {
+          namespaced: "b/invalid-default",
+          provider: "b",
+          id: "invalid-default",
+          reasoningEfforts: ["low", "high"],
+          defaultReasoningEffort: "max",
+        },
+        { namespaced: "c/empty", provider: "c", id: "empty", reasoningEfforts: [] },
+        { namespaced: "d/plain", provider: "d", id: "plain" },
+      ],
+    })) as ZcodeGeneratedConfig;
+    const models = document.provider[OPENCODE_PROVIDER_ID]!.models;
+
+    expect(models["a/reasoning"]!.reasoning).toEqual({
+      enabled: true,
+      levels: ["high", "low", "medium"],
+      defaultLevel: "high",
+    });
+    expect(models["b/invalid-default"]!.reasoning).toEqual({
+      enabled: true,
+      levels: ["low", "high"],
+    });
+    expect(models["c/empty"]!.reasoning).toBeUndefined();
+    expect(models["d/plain"]!.reasoning).toBeUndefined();
+    const serialized = JSON.stringify(document);
+    expect(serialized).not.toContain("variants");
+    expect(serialized).not.toContain("defaultVariant");
+    expect(serialized).not.toContain("providerOptionsByLevel");
   });
 
   test("native JSON round-trips and never carries a credential", () => {
