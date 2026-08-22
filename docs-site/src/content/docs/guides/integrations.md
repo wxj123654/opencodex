@@ -1,10 +1,10 @@
 ---
 title: Integrations
-description: Connect opencodex to OpenCode, Pi, OMP, Hermes, OpenClaw, Kimi Code, Gajae Code, DeepSeek Harness and MiniMax Code from the dashboard — one switch per client, with a backup taken before every write.
+description: Connect opencodex to OpenCode, Pi, OMP, Hermes, OpenClaw, Kimi Code, Gajae Code, DeepSeek Harness, MiniMax Code and ZCode from the dashboard — one switch per client, with a backup taken before every write.
 ---
 
 The **Integrations** tab writes opencodex's provider block into a client's own config
-file, and removes it again. Nine clients work this way, each with a switch:
+file, and removes it again. Ten clients work this way, each with a switch:
 
 | Client | Config file | Format | When the change takes effect | Credential |
 |---|---|---|---|---|
@@ -17,6 +17,12 @@ file, and removes it again. Nine clients work this way, each with a switch:
 | Gajae Code | `~/.gjc/agent/models.yml` | YAML | new sessions, or when you open `/model` |`OPENCODEX_GAJAE_API_KEY` |
 | DeepSeek Harness (DSH) | `$DSH_HOME/settings.yaml` (default `~/.dsh/settings.yaml`) | YAML | hot reload | non-secret loopback bearer placeholder |
 | MiniMax Code | `~/.minimax/config.yaml` | YAML | new sessions, or after opening the model picker | loopback placeholder |
+| ZCode | `~/.zcode/v2/config.json` (`ZCODE_DATA_DIR` changes the root) | JSON | after restarting ZCode | loopback placeholder |
+
+ZCode's managed block owns only `provider.opencodex`. When a model has a non-empty reasoning
+ladder, the generated entry includes `reasoning.levels` and a matching `reasoning.defaultLevel`
+when one is known. Models without reliable reasoning metadata omit that block. ZCode reads the
+file at startup, so restart it after Apply or Refresh.
 
 Managed DSH support has a compatibility floor of **DSH 0.1.0-rc.6**. OpenCodex owns only
 `llm-pi-ai.providers.opencodex`; Apply and Refresh replace that fragment, Disable removes only that
@@ -113,8 +119,8 @@ changed value and calling it success. You will see the file named and nothing on
 disk will have moved. Editing that file by hand still works; it is only our
 automatic rewrite that declines.
 
-**Pi, Kimi Code, Gajae Code, MiniMax Code and the managed DSH integration only work against a loopback bind.**
-The first four have no config field for the `x-opencodex-api-key` header a non-loopback bind
+**Pi, Kimi Code, Gajae Code, MiniMax Code, ZCode and the managed DSH integration only work against a loopback bind.**
+These clients have no config field for the `x-opencodex-api-key` header a non-loopback bind
 requires. DSH has a generic headers map, but rc.6 does not document that dedicated admission
 header as a supported integration contract, so the managed writer fails closed instead of
 guessing. Give them loopback access through an SSH tunnel or a local forwarder that adds the header.
@@ -151,6 +157,16 @@ For MiniMax Code, connect the provider once and launch through the checked wrapp
 ocx integration client enable --client mcode
 ocx mcode
 ```
+
+For ZCode, enable the managed provider block and restart ZCode after it is written:
+
+```bash
+ocx zcode enable
+```
+
+The generated ZCode model entries carry `reasoning.levels` and `reasoning.defaultLevel` when
+OpenCodex has a reliable effort ladder for that model. The proxy remains responsible for
+translating the selected level to the upstream provider's request format.
 
 The separate MiniMax platform CLI (`mmx`) is not a file-toggle integration. Its text
 commands use MiniMax's Anthropic-compatible endpoint, so OpenCodex provides a

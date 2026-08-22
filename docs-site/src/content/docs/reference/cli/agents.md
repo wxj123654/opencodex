@@ -169,7 +169,7 @@ Manage and apply the Grok Build model fence.
 
 ## Client config export
 
-### `ocx export --client <opencode|pi|omp|hermes|openclaw|kimi|gajae|dsh>`
+### `ocx export --client <opencode|pi|omp|hermes|openclaw|kimi|gajae|dsh|mcode|zcode>`
 
 Print a client config wired to the running proxy. The command serializes the
 `opencodex` provider block — base URL, model list, and the client's credential
@@ -180,7 +180,7 @@ models Codex can currently see.
 
 | Flag | Action |
 | --- | --- |
-| `--client <opencode\|pi\|omp\|hermes\|openclaw\|kimi\|gajae\|dsh>` | Required. Selects the client config dialect. |
+| `--client <opencode\|pi\|omp\|hermes\|openclaw\|kimi\|gajae\|dsh\|mcode\|zcode>` | Required. Selects the client config dialect. |
 | `--json` | Print the generated document as JSON on stdout for scripts. This is JSON even when the selected client's native format is YAML, TOML, or JSON5. |
 | `--out <path>` | Write the client's native config format to `<path>`. Refuses to replace an existing file. |
 | `--force` | Allow `--out` to replace an existing file. |
@@ -206,6 +206,12 @@ client applies its own defaults for those).
 | `kimi` | `~/.kimi-code/config.toml` | `kimi-config.toml` | none — loopback placeholder |
 | `gajae` | `~/.gjc/agent/models.yml` | `gajae-models.yaml` | `OPENCODEX_GAJAE_API_KEY` |
 | `dsh` | `$DSH_HOME/settings.yaml` (default `~/.dsh/settings.yaml`) | `settings.yaml` | none — non-secret loopback bearer placeholder |
+| `mcode` | `~/.minimax/config.yaml` | `config.yaml` | none — loopback placeholder |
+| `zcode` | `~/.zcode/v2/config.json` (`ZCODE_DATA_DIR` changes the root) | `config.json` | none — loopback placeholder |
+
+ZCode model entries include `reasoning.levels` and `reasoning.defaultLevel` when the model catalog
+provides a non-empty effort ladder and a matching default. The field is omitted when that metadata
+is unavailable. Restart ZCode after applying the generated file.
 
 The managed DSH export requires DSH 0.1.0-rc.6 or newer and owns only
 `llm-pi-ai.providers.opencodex`. DSH hot reloads that provider; the user's default model and
