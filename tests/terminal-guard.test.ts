@@ -3,6 +3,7 @@ import {
   analyzeTerminalTurn,
   buildContinuationRequest,
   guardTerminalEventStream,
+  isTerminalGuardPassthroughOnly,
 } from "../src/server/responses/terminal-guard";
 import { buildResponseJSON } from "../src/bridge";
 import type { AdapterEvent, OcxParsedRequest } from "../src/types";
@@ -215,6 +216,30 @@ describe("terminal guard", () => {
       .toBe(JSON.stringify(buildContinuationRequest(request, clean).context.messages));
   });
 
+  // The rebuild used to read the clock twice — once for the assistant message, once for the
+  // nudge pushed after it — so a millisecond boundary between the two reads gave one rebuild two
+  // different timestamps. That is what made the contract test above fail intermittently on CI
+  // (shard 2/4, twice in a row) while passing locally: the compared records differed by 1ms.
+  // Pin the invariant on the rebuild itself rather than on the comparison that exposed it.
+  test("one rebuild carries a single timestamp across a millisecond boundary", () => {
+    const events: AdapterEvent[] = [{ type: "text_delta", text: "我接下来会修改相关文件。" }];
+    const request = parsed("继续检查");
+    // Sample across real boundary crossings: a single-shot assertion passes even on the
+    // two-clock-read version whenever both reads land in the same millisecond.
+    const deadline = Date.now() + 25;
+    let sampled = 0;
+    while (Date.now() < deadline) {
+      const messages = buildContinuationRequest(request, events).context.messages;
+      const assistant = messages.at(-2);
+      const nudge = messages.at(-1);
+      expect(assistant?.role).toBe("assistant");
+      expect(nudge?.role).toBe("developer");
+      expect(assistant?.timestamp).toBe(nudge?.timestamp);
+      sampled += 1;
+    }
+    expect(sampled).toBeGreaterThan(0);
+  });
+
   test("heartbeats reach the consumer so the bridge watchdog stays armed", async () => {
     const actual: AdapterEvent[] = [];
     for await (const event of guardTerminalEventStream({
@@ -234,6 +259,16 @@ describe("terminal guard", () => {
 
     expect(actual.filter(event => event.type === "heartbeat")).toHaveLength(50);
     expect(actual.filter(event => event.type === "done")).toHaveLength(1);
+  });
+
+  test("does not retain passthrough-only liveness or tool argument fragments", () => {
+    expect(isTerminalGuardPassthroughOnly({ type: "heartbeat" })).toBe(true);
+    expect(isTerminalGuardPassthroughOnly({
+      type: "tool_call_delta",
+      arguments: "x".repeat(1024 * 1024),
+    })).toBe(true);
+    expect(isTerminalGuardPassthroughOnly({ type: "tool_call_start", id: "call_1", name: "exec_command" })).toBe(false);
+    expect(isTerminalGuardPassthroughOnly({ type: "text_delta", text: "working" })).toBe(false);
   });
 
   test("stops after the configured continuation bound", async () => {
