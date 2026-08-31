@@ -3,6 +3,9 @@ import { createResponsesPassthroughAdapter as createResponsesPassthroughAdapterP
 import { openaiResponsesUrl } from "../src/adapters/openai-responses-url";
 import { enrichProviderFromRegistry, providerConfigSeed } from "../src/providers/derive";
 import { getProviderRegistryEntry } from "../src/providers/registry";
+import { XAI_GROK_CLI_BASE_URL } from "../src/providers/xai-transport";
+import { routeModel } from "../src/router";
+import { resolveWireProtocolOverride } from "../src/server/adapter-resolve";
 import { handleResponses, sanitizeEncryptedContentInPlace } from "../src/server/responses";
 import {
   encodeCompactionSummary,
@@ -237,6 +240,45 @@ describe("DeepSeek Responses endpoint contract", () => {
     expect(nativeBody.tools).toEqual(rawBody.tools);
   });
 
+  test("xAI multi-agent clamps synthetic max and ultra efforts to its real Responses ladder", () => {
+    const config: OcxConfig = {
+      port: 10100,
+      defaultProvider: "xai",
+      providers: {
+        xai: {
+          adapter: "openai-chat",
+          baseUrl: "https://api.x.ai/v1",
+          authMode: "key",
+          apiKey: "xai-test-key",
+        },
+      },
+    };
+    const route = routeModel(config, "xai/grok-4.20-multi-agent-0309");
+    const responsesProvider = resolveWireProtocolOverride(
+      "xai",
+      route.modelId,
+      route.provider,
+      "responses",
+    );
+
+    expect(responsesProvider.adapter).toBe("openai-responses");
+    for (const requested of ["max", "ultra"] as const) {
+      const body = JSON.parse(createResponsesPassthroughAdapter(responsesProvider).buildRequest({
+        modelId: route.modelId,
+        context: { messages: [] },
+        stream: true,
+        options: { reasoning: requested },
+        _rawBody: {
+          model: route.modelId,
+          input: "ping",
+          reasoning: { effort: requested },
+        },
+      }, { headers: new Headers() }).body) as { reasoning?: { effort?: string } };
+
+      expect(body.reasoning?.effort).toBe("xhigh");
+    }
+  });
+
   test("a config saved before the fix is backfilled, and a hand-set path is preserved", () => {
     const saved = { adapter: "openai-chat", baseUrl: "https://api.deepseek.com", apiKey: "sk-test" } as Parameters<typeof enrichProviderFromRegistry>[1];
     enrichProviderFromRegistry("deepseek", saved);
@@ -245,6 +287,369 @@ describe("DeepSeek Responses endpoint contract", () => {
     const custom = { adapter: "openai-chat", baseUrl: "https://api.deepseek.com", apiKey: "sk-test", responsesPath: "/custom/responses" } as Parameters<typeof enrichProviderFromRegistry>[1];
     enrichProviderFromRegistry("deepseek", custom);
     expect(custom.responsesPath).toBe("/custom/responses");
+  });
+});
+
+describe("Responses custom-tool destination capability", () => {
+  test("xAI explicitly denies native custom tools and registry enrichment preserves an override", () => {
+    const entry = getProviderRegistryEntry("xai")!;
+    expect(entry.supportsResponsesCustomTools).toBe(false);
+
+    const inherited = {
+      adapter: entry.adapter,
+      baseUrl: entry.baseUrl,
+    } as Parameters<typeof enrichProviderFromRegistry>[1];
+    enrichProviderFromRegistry("xai", inherited);
+    expect(inherited.supportsResponsesCustomTools).toBe(false);
+
+    const explicit = {
+      adapter: entry.adapter,
+      baseUrl: entry.baseUrl,
+      supportsResponsesCustomTools: true,
+    } as Parameters<typeof enrichProviderFromRegistry>[1];
+    enrichProviderFromRegistry("xai", explicit);
+    expect(explicit.supportsResponsesCustomTools).toBe(true);
+
+    const routed = routeModel({
+      port: 0,
+      defaultProvider: "xai",
+      providers: {
+        xai: { adapter: entry.adapter, baseUrl: entry.baseUrl, authMode: "oauth" },
+      },
+    } as OcxConfig, "xai/grok-4.6");
+    expect(routed.provider.supportsResponsesCustomTools).toBe(false);
+  });
+
+  test("noncanonical forward destinations that deny custom tools lower apply_patch", () => {
+    const rawBody = {
+      model: "routed-model",
+      input: [
+        { type: "custom_tool_call", id: "ctc_patch", call_id: "c1", name: "apply_patch", input: "noop" },
+      ],
+      tools: [
+        { type: "custom", name: "apply_patch", description: "Apply a patch", format: { type: "grammar", syntax: "lark" } },
+      ],
+    };
+    const parsed = {
+      modelId: "routed-model",
+      context: { messages: [] },
+      stream: true,
+      options: {},
+      _rawBody: rawBody,
+    };
+    const request = createResponsesPassthroughAdapter({
+      adapter: "openai-responses",
+      baseUrl: "https://provider.example/v1",
+      authMode: "forward",
+      headers: { authorization: "Bearer provider-static" },
+      supportsResponsesCustomTools: false,
+    }).buildRequest(parsed, { headers: new Headers({ authorization: "Bearer caller-secret" }) });
+    const body = JSON.parse(request.body) as {
+      tools: Array<Record<string, unknown>>;
+      input: Array<Record<string, unknown>>;
+    };
+
+    expect(request.headers.authorization).toBe("Bearer provider-static");
+    expect(body.tools[0]).toMatchObject({ type: "function", name: "apply_patch" });
+    expect(body.input[0]).toMatchObject({
+      type: "function_call",
+      call_id: "c1",
+      name: "apply_patch",
+      arguments: JSON.stringify({ input: "noop" }),
+    });
+    expect([...(request.convertedRoutedCustomToolNames ?? [])]).toEqual(["apply_patch"]);
+  });
+
+  test("the canonical Codex forward surface never lowers custom tools, even with an explicit denial", () => {
+    const rawBody = {
+      model: "gpt-5.6-sol",
+      stream: true,
+      input: [
+        { type: "custom_tool_call", id: "ctc_patch", call_id: "c1", name: "apply_patch", input: "noop" },
+      ],
+      tools: [
+        { type: "custom", name: "apply_patch", description: "Apply a patch", format: { type: "grammar", syntax: "lark" } },
+      ],
+    };
+    const parsed = {
+      modelId: "gpt-5.6-sol",
+      context: { messages: [] },
+      stream: true,
+      options: {},
+      _rawBody: rawBody,
+    };
+    const request = createResponsesPassthroughAdapter({
+      adapter: "openai-responses",
+      // Exact canonical Codex forward base URL: isCanonicalOpenAiForwardProvider is true,
+      // so the lowering gate must be unreachable regardless of the capability flag.
+      baseUrl: "https://chatgpt.com/backend-api/codex",
+      authMode: "forward",
+      headers: { authorization: "Bearer provider-static" },
+      supportsResponsesCustomTools: false,
+    }).buildRequest(parsed, { headers: new Headers({ authorization: "Bearer caller-secret" }) });
+    const body = JSON.parse(request.body) as {
+      tools: Array<Record<string, unknown>>;
+      input: Array<Record<string, unknown>>;
+    };
+
+    expect(body.tools[0]).toMatchObject({ type: "custom", name: "apply_patch" });
+    expect(body.input[0]).toMatchObject({ type: "custom_tool_call", call_id: "c1", name: "apply_patch" });
+    expect(request.convertedRoutedCustomToolNames ?? []).toEqual([]);
+  });
+});
+
+describe("routed compaction lowering order", () => {
+  const baseInput = [
+    {
+      type: "message",
+      role: "user",
+      content: [
+        { type: "input_text", text: "earlier turn" },
+        { type: "input_image", image_url: "data:image/png;base64,AAAA" },
+      ],
+    },
+    { type: "custom_tool_call", call_id: "c1", name: "apply_patch", input: "noop" },
+    { type: "custom_tool_call_output", call_id: "c1", output: "ok" },
+    {
+      type: "tool_search_call",
+      call_id: "c2",
+      execution: "client",
+      arguments: { query: "database" },
+    },
+    {
+      type: "tool_search_output",
+      call_id: "c2",
+      execution: "client",
+      status: "completed",
+      tools: [{
+        type: "function",
+        name: "loaded_tool",
+        defer_loading: true,
+        parameters: { type: "object" },
+      }],
+    },
+    {
+      type: "function_call",
+      call_id: "c3",
+      namespace: "collaboration",
+      name: "spawn_agent",
+      arguments: "{}",
+    },
+    { type: "function_call_output", call_id: "c3", output: "done" },
+    {
+      type: "additional_tools",
+      role: "developer",
+      tools: [{
+        type: "function",
+        name: "extra",
+        defer_loading: true,
+        parameters: { type: "object" },
+      }],
+    },
+  ];
+  const rawBody = (compaction: boolean) => ({
+    model: "routed-model",
+    stream: false,
+    input: [
+      ...baseInput,
+      ...(compaction ? [{ type: "compaction_trigger" }] : []),
+    ],
+    tools: [
+      {
+        type: "custom",
+        name: "apply_patch",
+        description: "Apply patch",
+        format: { type: "text" },
+      },
+      {
+        type: "function",
+        name: "tool_search",
+        description: "Ordinary collision",
+        parameters: { type: "object" },
+      },
+      {
+        type: "tool_search",
+        execution: "client",
+        description: "Find tools",
+        parameters: {
+          type: "object",
+          properties: { query: { type: "string" } },
+          required: ["query"],
+        },
+      },
+      {
+        type: "namespace",
+        name: "collaboration",
+        tools: [{ type: "function", name: "spawn_agent", parameters: { type: "object" } }],
+      },
+    ],
+    tool_choice: "auto",
+    parallel_tool_calls: true,
+    text: { format: { type: "json_object" } },
+  });
+  const loweredReplay = [
+    {
+      type: "function_call",
+      call_id: "c1",
+      name: "apply_patch",
+      arguments: JSON.stringify({ input: "noop" }),
+    },
+    { type: "function_call_output", call_id: "c1", output: "ok" },
+    {
+      type: "function_call",
+      call_id: "c2",
+      name: "opencodex_tool_search",
+      arguments: JSON.stringify({ query: "database" }),
+    },
+    {
+      type: "function_call_output",
+      call_id: "c2",
+      output: JSON.stringify({
+        tools: [{
+          type: "function",
+          name: "loaded_tool",
+          defer_loading: true,
+          parameters: { type: "object" },
+        }],
+        status: "completed",
+      }),
+    },
+    {
+      type: "function_call",
+      call_id: "c3",
+      name: "collaboration__spawn_agent",
+      arguments: "{}",
+    },
+    { type: "function_call_output", call_id: "c3", output: "done" },
+  ];
+  const loweredTools = [
+    {
+      type: "function",
+      name: "apply_patch",
+      description: "Apply patch",
+      parameters: {
+        type: "object",
+        properties: {
+          input: {
+            type: "string",
+            description: "Raw input for this client-executed custom tool.",
+          },
+        },
+        required: ["input"],
+        additionalProperties: false,
+      },
+    },
+    {
+      type: "function",
+      name: "tool_search",
+      description: "Ordinary collision",
+      parameters: { type: "object" },
+    },
+    {
+      type: "function",
+      description: "Find tools",
+      parameters: {
+        type: "object",
+        properties: { query: { type: "string" } },
+        required: ["query"],
+      },
+      name: "opencodex_tool_search",
+    },
+    {
+      type: "function",
+      name: "collaboration__spawn_agent",
+      parameters: { type: "object" },
+    },
+    { type: "function", name: "loaded_tool", parameters: { type: "object" } },
+  ];
+
+  function build(compaction: boolean) {
+    const adapter = createResponsesPassthroughAdapter({
+      adapter: "openai-responses",
+      baseUrl: "https://gateway.example/v1",
+      authMode: "key",
+      apiKey: "test-key",
+      supportsResponsesCustomTools: false,
+    });
+    return adapter.buildRequest({
+      modelId: "routed-model",
+      context: { messages: [] },
+      stream: false,
+      options: {},
+      _rawBody: rawBody(compaction),
+      ...(compaction ? { _compactionRequest: true } : {}),
+    }, { headers: new Headers() });
+  }
+
+  test("lowers replayed calls before removing the compaction tool surface", () => {
+    const built = build(true);
+    const body = JSON.parse(built.body) as Record<string, unknown> & {
+      input: Array<Record<string, unknown>>;
+    };
+
+    expect(body.input.slice(0, -1)).toEqual([
+      {
+        type: "message",
+        role: "user",
+        content: [
+          { type: "input_text", text: "earlier turn" },
+          { type: "input_text", text: "[image omitted for compaction]" },
+        ],
+      },
+      ...loweredReplay,
+    ]);
+    expect(body.input.at(-1)).toEqual({
+      type: "message",
+      role: "user",
+      content: [{
+        type: "input_text",
+        text: expect.stringContaining("CONTEXT CHECKPOINT COMPACTION"),
+      }],
+    });
+
+    expect(body).not.toHaveProperty("tools");
+    expect(body).not.toHaveProperty("tool_choice");
+    expect(body).not.toHaveProperty("parallel_tool_calls");
+    expect(body).not.toHaveProperty("text");
+    expect(body.input.some(item => item.type === "compaction_trigger")).toBe(false);
+    expect(body.input.some(item => item.type === "additional_tools")).toBe(false);
+    expect(JSON.stringify(body)).not.toContain("input_image");
+    expect(JSON.stringify(body)).not.toContain("data:image/png");
+    expect(body.input.find(item => item.call_id === "c3")).not.toHaveProperty("namespace");
+
+    expect([...(built.convertedRoutedCustomToolNames ?? [])]).toEqual(["apply_patch"]);
+    expect([...(built.convertedRoutedToolSearchNames ?? [])]).toEqual(["opencodex_tool_search"]);
+    expect([...(built.convertedRoutedNamespaceToolAliases ?? new Map()).entries()]).toEqual([
+      ["collaboration__spawn_agent", { namespace: "collaboration", name: "spawn_agent", kind: "function" }],
+    ]);
+  });
+
+  test("leaves the non-compaction serialized body byte-identical", () => {
+    const built = build(false);
+    expect(built.body).toBe(JSON.stringify({
+      model: "routed-model",
+      stream: false,
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [
+            { type: "input_text", text: "earlier turn" },
+            { type: "input_image", image_url: "data:image/png;base64,AAAA" },
+          ],
+        },
+        ...loweredReplay,
+        {
+          type: "additional_tools",
+          role: "developer",
+          tools: [{ type: "function", name: "extra", parameters: { type: "object" } }],
+        },
+      ],
+      tools: loweredTools,
+      tool_choice: "auto",
+      parallel_tool_calls: true,
+      text: { format: { type: "json_object" } },
+    }));
   });
 });
 
@@ -509,6 +914,184 @@ describe("OpenAI Responses passthrough sanitization", () => {
     ]);
   });
 
+  test("normalizes or omits xAI CLI root unions after namespace lowering", () => {
+    const unsafeAutomationParameters = {
+      oneOf: [
+        {
+          type: "object",
+          properties: { mode: { type: "string", enum: ["view"] } },
+          required: ["mode"],
+        },
+        {
+          oneOf: [
+            {
+              type: "object",
+              properties: { id: { type: "string" }, mode: { const: "update" } },
+              required: ["id", "mode"],
+            },
+            {
+              type: "object",
+              properties: { name: { type: "string" }, mode: { const: "create" } },
+              required: ["name", "mode"],
+            },
+          ],
+        },
+      ],
+    };
+    const safeUnionParameters = {
+      type: "object",
+      properties: { token: { type: "string" } },
+      required: ["token"],
+      oneOf: [
+        { properties: { mode: { const: "view" } } },
+        { properties: { mode: { const: "delete" } } },
+      ],
+    };
+    const namespace = {
+      type: "namespace",
+      name: "mcp__codex_app",
+      tools: [
+        { type: "function", name: "automation_update", parameters: unsafeAutomationParameters },
+        { type: "function", name: "safe_union", parameters: safeUnionParameters },
+        { type: "function", name: "plain", parameters: {} },
+      ],
+    };
+    const adapter = createResponsesPassthroughAdapter({
+      adapter: "openai-responses",
+      baseUrl: XAI_GROK_CLI_BASE_URL,
+      authMode: "oauth",
+      apiKey: "xai-test",
+    });
+    const build = (lite: boolean) => JSON.parse(adapter.buildRequest({
+      modelId: "grok-4.6",
+      context: { messages: [] },
+      stream: true,
+      options: {},
+      _rawBody: {
+        model: "grok-4.6",
+        input: lite ? [{ type: "additional_tools", tools: [namespace] }] : [],
+        ...(lite ? {} : { tools: [namespace] }),
+      },
+    }, { headers: new Headers() }).body) as {
+      tools?: Array<{ name?: string; parameters?: Record<string, unknown> }>;
+      input: Array<{ type: string; tools?: Array<{ name?: string; parameters?: Record<string, unknown> }> }>;
+    };
+
+    for (const lite of [false, true]) {
+      const body = build(lite);
+      const tools = lite ? body.input[0]?.tools : body.tools;
+      expect(tools?.map(tool => tool.name)).toEqual([
+        "mcp__codex_app__safe_union",
+        "mcp__codex_app__plain",
+      ]);
+      const safe = tools?.find(tool => tool.name === "mcp__codex_app__safe_union")?.parameters;
+      expect(safe).toEqual({
+        type: "object",
+        properties: {
+          token: { type: "string" },
+          // Disjoint consts, so `anyOf` describes the same set the root `oneOf` did. `mode` is
+          // promoted into `required`: absent, it matched BOTH branches, which `oneOf` rejects.
+          mode: { anyOf: [{ const: "view" }, { const: "delete" }] },
+        },
+        required: ["token", "mode"],
+      });
+      expect(tools?.find(tool => tool.name === "mcp__codex_app__plain")?.parameters)
+        .toEqual({ type: "object" });
+    }
+  });
+
+  test("reconciles tool_choice against tools the xAI CLI schema policy omitted", () => {
+    // `oneOf` branches that disagree on which property names exist cannot be flattened, so this
+    // function is dropped. Namespace lowering already rewrote both the declaration and the
+    // selector to wire names, so the selector is left pointing at a tool that no longer ships.
+    const unsafe = {
+      oneOf: [
+        { type: "object", properties: { mode: { const: "view" } }, required: ["mode"] },
+        { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+      ],
+    };
+    const namespace = {
+      type: "namespace",
+      name: "mcp__codex_app",
+      tools: [
+        { type: "function", name: "automation_update", parameters: unsafe },
+        { type: "function", name: "plain", parameters: {} },
+      ],
+    };
+    const adapter = createResponsesPassthroughAdapter({
+      adapter: "openai-responses",
+      baseUrl: XAI_GROK_CLI_BASE_URL,
+      authMode: "oauth",
+      apiKey: "xai-test",
+    });
+    const build = (toolChoice: unknown) => adapter.buildRequest({
+      modelId: "grok-4.6",
+      context: { messages: [] },
+      stream: true,
+      options: {},
+      _rawBody: { model: "grok-4.6", input: [], tools: [namespace], tool_choice: toolChoice },
+    }, { headers: new Headers() });
+
+    // A forced selection has no safe replacement: relaxing it to auto would quietly run the turn
+    // without the tool the caller required, so this fails locally instead of reaching Grok.
+    expect(() => build({ type: "function", name: "mcp__codex_app__automation_update" }))
+      .toThrow(/tool_choice requires function "mcp__codex_app__automation_update"/);
+
+    // An allowed_tools list still has a usable entry, so it simply loses the omitted one.
+    const narrowed = JSON.parse(build({
+      type: "allowed_tools",
+      mode: "auto",
+      tools: [
+        { type: "function", name: "mcp__codex_app__automation_update" },
+        { type: "function", name: "mcp__codex_app__plain" },
+      ],
+    }).body) as { tool_choice: { tools: Array<{ name: string }> } };
+    expect(narrowed.tool_choice.tools).toEqual([{ type: "function", name: "mcp__codex_app__plain" }]);
+
+    // Nothing left to point at is the forced case again.
+    expect(() => build({
+      type: "allowed_tools",
+      mode: "auto",
+      tools: [{ type: "function", name: "mcp__codex_app__automation_update" }],
+    })).toThrow(/tool_choice requires function/);
+
+    // A selector naming a surviving tool is untouched.
+    const kept = JSON.parse(build({ type: "function", name: "mcp__codex_app__plain" }).body) as {
+      tool_choice: unknown;
+    };
+    expect(kept.tool_choice).toEqual({ type: "function", name: "mcp__codex_app__plain" });
+  });
+
+  test("keeps native root unions on public xAI Responses", () => {
+    const parameters = {
+      oneOf: [
+        { type: "object", properties: { mode: { const: "view" } } },
+        { oneOf: [{ type: "object", properties: {} }, { type: "object", properties: {} }] },
+      ],
+    };
+    const request = createResponsesPassthroughAdapter({
+      adapter: "openai-responses",
+      baseUrl: "https://api.x.ai/v1",
+      authMode: "key",
+      apiKey: "xai-test",
+    }).buildRequest({
+      modelId: "grok-4.6",
+      context: { messages: [] },
+      stream: true,
+      options: {},
+      _rawBody: {
+        model: "grok-4.6",
+        input: [],
+        tools: [{ type: "function", name: "automation_update", parameters }],
+      },
+    }, { headers: new Headers() });
+    const body = JSON.parse(request.body) as {
+      tools: Array<{ parameters: Record<string, unknown> }>;
+    };
+
+    expect(body.tools[0]?.parameters).toEqual({ ...parameters, type: "object" });
+  });
+
   test("model reasoning-summary opt-out strips unsupported delivery fields (#323)", () => {
     const adapter = createResponsesPassthroughAdapter({
       adapter: "openai-responses",
@@ -540,6 +1123,79 @@ describe("OpenAI Responses passthrough sanitization", () => {
 
     expect(body.stream_options).toEqual({ include_usage: true });
     expect(body.reasoning).toEqual({ effort: "high" });
+  });
+
+  function routedXaiResponsesProvider() {
+    const entry = getProviderRegistryEntry("xai")!;
+    const route = routeModel({
+      port: 0,
+      defaultProvider: "xai",
+      providers: {
+        xai: {
+          adapter: entry.adapter,
+          baseUrl: entry.baseUrl,
+          authMode: "key",
+          apiKey: "xai-test-key",
+          modelAdapters: { "grok-4.6": "openai-responses" },
+        },
+      },
+    } as OcxConfig, "xai/grok-4.6");
+    return resolveWireProtocolOverride(route.providerName, route.modelId, route.provider);
+  }
+
+  test("xAI verbosity opt-out strips verbosity but preserves sibling text settings", () => {
+    const provider = routedXaiResponsesProvider();
+    expect(provider.modelSupportsVerbosity?.["grok-4.6"]).toBe(false);
+    expect(provider.adapter).toBe("openai-responses");
+
+    const request = createResponsesPassthroughAdapter(provider).buildRequest({
+      modelId: "grok-4.6",
+      context: { messages: [] },
+      stream: true,
+      options: {},
+      _rawBody: {
+        model: "grok-4.6",
+        input: [],
+        reasoning: { effort: "high" },
+        text: { verbosity: "high", format: { type: "json_object" } },
+      },
+    }, { headers: new Headers() });
+    const body = JSON.parse(request.body) as Record<string, unknown>;
+
+    expect(body.text).toEqual({ format: { type: "json_object" } });
+    expect(body.reasoning).toEqual({ effort: "high" });
+  });
+
+  test("xAI verbosity opt-out removes an emptied text object", () => {
+    const request = createResponsesPassthroughAdapter(routedXaiResponsesProvider()).buildRequest({
+      modelId: "grok-4.6",
+      context: { messages: [] },
+      stream: true,
+      options: {},
+      _rawBody: { model: "grok-4.6", input: [], text: { verbosity: "low" } },
+    }, { headers: new Headers() });
+    const body = JSON.parse(request.body) as Record<string, unknown>;
+
+    expect(body).not.toHaveProperty("text");
+  });
+
+  test("unclassified Responses destinations preserve text verbosity", () => {
+    const adapter = createResponsesPassthroughAdapter({
+      adapter: "openai-responses",
+      baseUrl: "https://compat.example.test/v1",
+      authMode: "key",
+      apiKey: "sk-test",
+    });
+    const request = adapter.buildRequest({
+      modelId: "other-model",
+      context: { messages: [] },
+      stream: true,
+      options: {},
+      _rawBody: { model: "other-model", input: [], text: { verbosity: "medium" } },
+    }, { headers: new Headers() });
+    const body = JSON.parse(request.body) as Record<string, unknown>;
+
+    expect(body.text).toEqual({ verbosity: "medium" });
   });
 
   test("model reasoning-summary delivery rewrites only the configured stale-client enum (#538)", () => {
@@ -976,7 +1632,7 @@ describe("OpenAI Responses passthrough sanitization", () => {
     expect(body.tools[0]).toMatchObject({ type: "image_generation" });
   });
 
- test("drops ChatGPT's external_web_access hint but keeps routed web search", () => {
+ test("normalizes xAI top-level and additional web search without stale tool choice", () => {
    const adapter = createResponsesPassthroughAdapter({
      adapter: "openai-responses",
      baseUrl: "https://api.x.ai/v1",
@@ -998,21 +1654,18 @@ describe("OpenAI Responses passthrough sanitization", () => {
           tools: [{ type: "web_search", external_web_access: true, search_context_size: "medium" }],
         }],
         tools: [{ type: "web_search", external_web_access: false, filters: { allowed_domains: ["example.com"] } }],
+        tool_choice: { type: "web_search" },
       },
     }, { headers: new Headers() });
     const body = JSON.parse(request.body) as {
-      tools: Record<string, unknown>[];
+      tools?: Record<string, unknown>[];
       input: Array<{ type: string; tools: Record<string, unknown>[] }>;
+      tool_choice: Record<string, unknown>;
     };
 
-    expect(body.tools).toEqual([{
-      type: "web_search",
-      filters: { allowed_domains: ["example.com"] },
-    }]);
-    expect(body.input[0]?.tools).toEqual([{
-      type: "web_search",
-      search_context_size: "medium",
-    }]);
+    expect(body.tools).toBeUndefined();
+    expect(body.input[0]?.tools).toEqual([{ type: "web_search" }]);
+    expect(body.tool_choice).toEqual({ type: "web_search" });
   });
 
   test("preserves external_web_access on the canonical OpenAI forward route", () => {
@@ -1031,6 +1684,120 @@ describe("OpenAI Responses passthrough sanitization", () => {
     const body = JSON.parse(request.body) as { tools: Record<string, unknown>[] };
 
     expect(body.tools).toEqual([{ type: "web_search", external_web_access: true }]);
+  });
+
+  function buildXaiXSearchBody({
+    baseUrl = "https://cli-chat-proxy.grok.com/v1",
+    enabled,
+    tools,
+    toolChoice,
+  }: {
+    baseUrl?: string;
+    enabled?: boolean;
+    tools: Record<string, unknown>[];
+    toolChoice?: unknown;
+  }): Record<string, unknown> {
+    const request = createResponsesPassthroughAdapter({
+      adapter: "openai-responses",
+      baseUrl,
+      authMode: "key",
+      apiKey: "xai-test",
+      supportsOpenAiWebSearchToolFields: false,
+      ...(enabled === undefined ? {} : { xaiResponsesXSearch: enabled }),
+    }).buildRequest({
+      modelId: "grok-4.6",
+      context: { messages: [] },
+      stream: true,
+      options: {},
+      _rawBody: {
+        model: "grok-4.6",
+        input: [],
+        tools,
+        ...(toolChoice === undefined ? {} : { tool_choice: toolChoice }),
+      },
+    }, { headers: new Headers() });
+    return JSON.parse(request.body) as Record<string, unknown>;
+  }
+
+  test.each([
+    "https://api.x.ai/v1",
+    "https://cli-chat-proxy.grok.com/v1",
+  ])("injects x_search after live web_search normalization for %s", baseUrl => {
+    const body = buildXaiXSearchBody({
+      baseUrl,
+      enabled: true,
+      tools: [
+        { type: "function", name: "shell", parameters: { type: "object" } },
+        { type: "web_search", external_web_access: true, search_context_size: "medium" },
+      ],
+    }) as { tools: Record<string, unknown>[] };
+
+    expect(body.tools).toEqual([
+      { type: "function", name: "shell", parameters: { type: "object" } },
+      { type: "web_search" },
+      { type: "x_search" },
+    ]);
+  });
+
+  test("does not inject x_search outside the exact activation contract", () => {
+    const cases = [
+      buildXaiXSearchBody({
+        tools: [{ type: "web_search", external_web_access: true }],
+      }),
+      buildXaiXSearchBody({
+        baseUrl: "https://responses.example.test/v1",
+        enabled: true,
+        tools: [{ type: "web_search", external_web_access: true }],
+      }),
+      buildXaiXSearchBody({
+        baseUrl: "https://api.x.ai/v1",
+        enabled: true,
+        tools: [
+          { type: "function", name: "shell", parameters: { type: "object" } },
+          { type: "web_search", external_web_access: false },
+        ],
+      }),
+      buildXaiXSearchBody({
+        enabled: true,
+        tools: [{ type: "function", name: "shell", parameters: { type: "object" } }],
+      }),
+    ];
+
+    for (const body of cases) {
+      expect((body.tools as Record<string, unknown>[] | undefined)?.some(tool => tool.type === "x_search") ?? false)
+        .toBe(false);
+    }
+    expect(cases[2].tools).toEqual([
+      { type: "function", name: "shell", parameters: { type: "object" } },
+    ]);
+  });
+
+  test("keeps specific and allowed_tools selectors unchanged when x_search is injected", () => {
+    const selectors = [
+      { type: "function", name: "shell" },
+      {
+        type: "allowed_tools",
+        mode: "auto",
+        tools: [{ type: "function", name: "shell" }, { type: "web_search" }],
+      },
+    ];
+
+    for (const selector of selectors) {
+      const body = buildXaiXSearchBody({
+        enabled: true,
+        tools: [
+          { type: "function", name: "shell", parameters: { type: "object" } },
+          { type: "web_search", external_web_access: true },
+        ],
+        toolChoice: selector,
+      }) as { tools: Record<string, unknown>[]; tool_choice: Record<string, unknown> };
+      expect(body.tools.some(tool => tool.type === "x_search")).toBe(true);
+      expect(body.tool_choice).toEqual(selector);
+      const allowed = body.tool_choice.type === "allowed_tools"
+        ? body.tool_choice.tools as Record<string, unknown>[]
+        : [];
+      expect(allowed.some(tool => tool.type === "x_search")).toBe(false);
+    }
   });
 
   // `activateDeferredTool` clears `defer_loading` only for tools a `tool_search_output` already
@@ -1070,7 +1837,7 @@ describe("OpenAI Responses passthrough sanitization", () => {
       input: Array<{ tools: Record<string, unknown>[] }>;
     };
 
-    expect(body.tools[0]).toEqual({ type: "web_search_preview" });
+    expect(body.tools[0]).toEqual({ type: "web_search" });
     expect(body.tools[1]).toMatchObject({ type: "function", name: "workspace__read" });
     expect(body.tools[1]).not.toHaveProperty("defer_loading");
     expect(body.input[0].tools[0]).not.toHaveProperty("defer_loading");
@@ -1140,27 +1907,57 @@ describe("OpenAI Responses passthrough sanitization", () => {
     },
   );
 
-  test("keeps caller-sent prompt_cache_options while dropping the retired retention", () => {
-    const adapter = createResponsesPassthroughAdapter(provider);
-    const request = adapter.buildRequest({
-      modelId: "gpt-5.6-sol",
-      context: { messages: [] },
-      stream: true,
-      options: {},
-      _rawBody: {
-        model: "gpt-5.6-sol",
-        input: "hi",
-        prompt_cache_retention: "24h",
-        prompt_cache_options: { ttl: "30m" },
-      },
-    }, { headers: new Headers({ authorization: "Bearer token" }) });
-    const body = JSON.parse(request.body) as {
-      prompt_cache_retention?: string;
-      prompt_cache_options?: { ttl?: string };
-    };
+  test.each(["gpt-5.5", "gpt-5.6-luna"])(
+    "drops caller-sent prompt_cache_options for canonical forward model %s",
+    modelId => {
+      const adapter = createResponsesPassthroughAdapter(provider);
+      const request = adapter.buildRequest({
+        modelId,
+        context: { messages: [] },
+        stream: true,
+        options: {},
+        _rawBody: {
+          model: modelId,
+          input: "hi",
+          prompt_cache_options: { ttl: "30m" },
+        },
+      }, { headers: new Headers({ authorization: "Bearer token" }) });
+      const body = JSON.parse(request.body) as { prompt_cache_options?: { ttl?: string } };
 
-    expect(body.prompt_cache_retention).toBeUndefined();
-    expect(body.prompt_cache_options).toEqual({ ttl: "30m" });
+      expect(body.prompt_cache_options).toBeUndefined();
+    },
+  );
+
+  test("keeps prompt_cache_options for noncanonical forward and API-key providers", () => {
+    for (const configuredProvider of [
+      {
+        adapter: "openai-responses",
+        baseUrl: "https://gateway.example/v1",
+        authMode: "forward" as const,
+      },
+      {
+        adapter: "openai-responses",
+        baseUrl: "https://api.openai.com/v1",
+        authMode: "key" as const,
+        apiKey: "test-key",
+      },
+    ]) {
+      const adapter = createResponsesPassthroughAdapter(configuredProvider);
+      const request = adapter.buildRequest({
+        modelId: "gpt-5.6-sol",
+        context: { messages: [] },
+        stream: true,
+        options: {},
+        _rawBody: {
+          model: "gpt-5.6-sol",
+          input: "hi",
+          prompt_cache_options: { ttl: "30m" },
+        },
+      }, { headers: new Headers({ authorization: "Bearer token" }) });
+      const body = JSON.parse(request.body) as { prompt_cache_options?: { ttl?: string } };
+
+      expect(body.prompt_cache_options).toEqual({ ttl: "30m" });
+    }
   });
 
   test("a near-miss model id is not swept up by the gpt-5.6 family match", () => {
@@ -2795,14 +3592,17 @@ describe("reasoning input content channel", () => {
       summary: [{ type: "summary_text", text: "thinking" }],
       encrypted_content: "upstream-issued-blob",
     });
-    expect(out).not.toHaveProperty("content");
-    expect(out.encrypted_content).toBe("upstream-issued-blob");
-    expect(out.summary).toEqual([{ type: "summary_text", text: "thinking" }]);
+    expect(out).toEqual({
+      type: "reasoning",
+      summary: [{ type: "summary_text", text: "thinking" }],
+      encrypted_content: "upstream-issued-blob",
+    });
   });
 
-  // An OpenAI-operated backend binds the blob to the item's exact shape, so deleting a field there
-  // invalidates it: `The encrypted content ... could not be verified`. Caught in live traffic after
-  // an ungated first version of this fix shipped locally — the two backends want opposite things.
+  // An OpenAI-operated backend rejects a blob-bearing item when its null `content` channel is
+  // deleted: `The encrypted content ... could not be verified`. Caught in live traffic after an
+  // ungated first version of this fix shipped locally — the two backends want opposite things for
+  // this channel.
   test("keeps a null content channel on OpenAI-operated destinations", () => {
     const item = {
       type: "reasoning",
@@ -2823,9 +3623,7 @@ describe("reasoning input content channel", () => {
         _rawBody: { model: "gpt-5.6-sol", store: false, input: [item] },
       }, { headers: new Headers({ authorization: "Bearer token" }) });
       const out = (JSON.parse(request.body) as { input: Record<string, unknown>[] }).input[0];
-      expect(out).toHaveProperty("content");
-      expect(out.content).toBeNull();
-      expect(out.encrypted_content).toBe("openai-issued-blob");
+      expect(out).toEqual(item);
     }
   });
 

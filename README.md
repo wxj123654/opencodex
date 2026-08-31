@@ -21,17 +21,17 @@ ocx start        # proxy + dashboard on localhost:10100
       <sub><b>Claude Code, running any model.</b><br>The picker is stock Claude Code. The brain behind it isn't.</sub>
     </td>
     <td width="50%" align="center">
-      <img src="assets/demo.gif" alt="opencodex demo — running a task in the Codex app on a routed non-OpenAI model" width="410"><br>
+      <img src="https://raw.githubusercontent.com/lidge-jun/opencodex/main/assets/demo.gif" alt="opencodex demo — running a task in the Codex app on a routed non-OpenAI model" width="410"><br>
       <sub><b>Codex, running any model.</b><br>Pick a provider and go — same workflow, different brain.</sub>
     </td>
   </tr>
   <tr>
     <td width="50%" align="center">
-      <img src="assets/claude-desktop-subagent.gif" alt="Claude Desktop answering as Claude Opus 4.8, then dispatching a GPT-5.6 Sol subagent through opencodex" width="410"><br>
+      <img src="https://raw.githubusercontent.com/lidge-jun/opencodex/main/assets/claude-desktop-subagent.gif" alt="Claude Desktop answering as Claude Opus 4.8, then dispatching a GPT-5.6 Sol subagent through opencodex" width="410"><br>
       <sub><b>Claude Desktop, running any model.</b><br>Opus answers, then hands the task to a GPT-5.6 Sol subagent.</sub>
     </td>
     <td width="50%" align="center">
-      <img src="assets/grok-build-subagent.gif" alt="Grok Build running GPT-5.6 Sol through opencodex and calling a Kimi K3 subagent" width="410"><br>
+      <img src="https://raw.githubusercontent.com/lidge-jun/opencodex/main/assets/grok-build-subagent.gif" alt="Grok Build running GPT-5.6 Sol through opencodex and calling a Kimi K3 subagent" width="410"><br>
       <sub><b>Grok Build, running any model.</b><br>Sol drives the session and calls a Kimi K3 subagent.</sub>
     </td>
   </tr>
@@ -58,12 +58,12 @@ ocx start                            # or `ocx service` to run it in the backgro
 ```
 
 <details>
-<summary>Install from source (latest dev, Bun canary)</summary>
+<summary>Install from source (latest dev)</summary>
 
 **macOS / Linux:**
 
 ```bash
-curl -fsSL https://bun.sh/install | bash && ~/.bun/bin/bun upgrade --canary
+curl -fsSL https://bun.sh/install | bash
 git clone https://github.com/lidge-jun/opencodex.git
 cd opencodex && ~/.bun/bin/bun install
 ~/.bun/bin/bun run src/cli/index.ts start
@@ -72,13 +72,13 @@ cd opencodex && ~/.bun/bin/bun install
 **Windows (PowerShell):**
 
 ```powershell
-irm bun.sh/install.ps1 | iex; bun upgrade --canary
+irm bun.sh/install.ps1 | iex
 git clone https://github.com/lidge-jun/opencodex.git
 cd opencodex; bun install
 bun run src/cli/index.ts start
 ```
 
-Source install runs the latest `dev` branch with Bun canary. Memory ownership
+Source install runs the latest `dev` branch. Memory ownership
 patches, runtime GC improvements, and unreleased fixes are available here before
 they reach the npm package.
 
@@ -208,7 +208,7 @@ Qwen Cloud, SiliconFlow, and more. Full list: `ocx init` or the
 ocx init                       # interactive setup (writes config, wires Codex, offers the shim)
 ocx start [--port 10100]       # start the proxy in the foreground
 ocx stop                       # stop + restore native Codex
-ocx service [install|start|stop|status|uninstall|remove]  # background service
+ocx service [install|repair|restart|start|stop|status|uninstall|remove]  # background service
 ocx codex-shim install         # start the proxy on demand whenever `codex` launches
 ocx health [--json]            # check immediate proxy liveness
 ocx ready [--json] [--wait [--timeout <seconds>]]  # check post-sync readiness

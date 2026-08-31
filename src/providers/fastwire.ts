@@ -33,6 +33,7 @@ export interface FastPolicyAuthority {
   readonly providerAdapter: string;
   readonly providerAuthMode?: ProviderAuthKind;
   readonly fastWireDeclaration: FastWire | null | undefined;
+  readonly fastTierDescription?: string;
   readonly modelWireOverrideAllowed: boolean;
   readonly authTransport: FastPolicyAuthTransport;
   readonly capability: {
@@ -55,6 +56,7 @@ export interface ResolvedFastPolicy {
     | "pin-unavailable";
   readonly adapter: string;
   readonly fastWire: FastWire | null;
+  readonly fastTierDescription?: string;
   readonly forwardCallerTier: boolean;
 }
 
@@ -222,7 +224,16 @@ export function resolveFastPolicy(
   else if (capability === undefined) eligibility = "unclassified";
   else eligibility = "eligible";
 
-  return { capability, eligibility, adapter, fastWire, forwardCallerTier };
+  return {
+    capability,
+    eligibility,
+    adapter,
+    fastWire,
+    ...(authority.fastTierDescription !== undefined
+      ? { fastTierDescription: authority.fastTierDescription }
+      : {}),
+    forwardCallerTier,
+  };
 }
 
 export function canonicalFastTierMarker(callerTier: string | undefined): "priority" | undefined {
@@ -235,6 +246,7 @@ export function tierObservationContext(
   policy: ResolvedFastPolicy,
   fastMode: boolean | undefined,
   callerTier: string | undefined,
+  responseTierAuthoritative?: boolean,
 ): TierObservationContext {
   return {
     capability: policy.capability,
@@ -242,6 +254,7 @@ export function tierObservationContext(
     fastWire: policy.fastWire,
     demandDecision: fastMode === true ? "force-fast" : fastMode === false ? "force-default" : "inherit",
     ...(callerTier !== undefined ? { callerTier } : {}),
+    ...(responseTierAuthoritative !== undefined ? { responseTierAuthoritative } : {}),
   };
 }
 
@@ -333,7 +346,11 @@ export function createAdapterTierMetadata(
 
   const responseCanConfirmFast = effectiveFastRequested
     && context.eligibility === "eligible"
-    && wireValue !== null;
+    && wireValue !== null
+    // A destination whose echo is not authoritative can neither confirm nor deny Fast. The
+    // ChatGPT-internal Codex backend echoes "default" on priority-scheduled turns, so believing
+    // it reported every Fast request as `response-declined` (#2558).
+    && context.responseTierAuthoritative !== false;
   return {
     outcome,
     observeResponseServiceTier(value: unknown) {
