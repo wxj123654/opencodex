@@ -66,6 +66,53 @@ describe("AgentRouter openai-chat compatibility", () => {
   });
 });
 
+describe("passthrough developer-role normalization", () => {
+  // Zhipu GLM coding endpoint answers 400 code 1214 "Incorrect role information" for any
+  // `developer` message; a chat client pointed at the proxy (not at the upstream host)
+  // cannot know the upstream is strict, so the proxy must normalize. Regression for the
+  // pi-coding-agent → opencodex → zai/glm-5.3-flash 400 report (260831).
+  const rawBody = {
+    messages: [
+      { role: "developer", content: "You are a coding agent." },
+      { role: "user", content: "Say OK" },
+    ],
+  };
+
+  test("rewrites developer messages to system on strict OpenAI-compatible backends", () => {
+    const request = buildOpenAIChatPassthroughRequest(
+      provider({ baseUrl: "https://api.z.ai/api/coding/paas/v4" }),
+      rawBody,
+      "glm-5.3-flash",
+      false,
+    );
+    const body = JSON.parse(request.body as string) as { messages: { role: string }[] };
+    expect(body.messages.map(m => m.role)).toEqual(["system", "user"]);
+    expect((rawBody.messages[0] as { role: string }).role).toBe("developer");
+  });
+
+  test("keeps developer messages verbatim on the native OpenAI chat endpoint", () => {
+    const request = buildOpenAIChatPassthroughRequest(
+      provider({ baseUrl: "https://api.openai.com/v1" }),
+      rawBody,
+      "gpt-5.5",
+      false,
+    );
+    const body = JSON.parse(request.body as string) as { messages: { role: string }[] };
+    expect(body.messages.map(m => m.role)).toEqual(["developer", "user"]);
+  });
+
+  test("leaves developer messages untouched when the caller body has none", () => {
+    const request = buildOpenAIChatPassthroughRequest(
+      provider({ baseUrl: "https://api.z.ai/api/coding/paas/v4" }),
+      { messages: [{ role: "user", content: "Say OK" }] },
+      "glm-5.3-flash",
+      false,
+    );
+    const body = JSON.parse(request.body as string) as { messages: { role: string }[] };
+    expect(body.messages.map(m => m.role)).toEqual(["user"]);
+  });
+});
+
 function parsed(): OcxParsedRequest {
   return {
     modelId: "test-model",

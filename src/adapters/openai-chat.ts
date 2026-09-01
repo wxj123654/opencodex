@@ -117,7 +117,10 @@ export function buildOpenAIChatPassthroughRequest(
 
   const body: Record<string, unknown> = {
     model: provider.modelSuffixBracketStrip ? stripBracketedModelSuffix(modelId) : modelId,
-    messages: frameAgentRouterMessages(provider.baseUrl, rawBody.messages),
+    messages: normalizePassthroughDeveloperRoles(
+      provider,
+      frameAgentRouterMessages(provider.baseUrl, rawBody.messages),
+    ),
     stream,
   };
   for (const field of CHAT_PASSTHROUGH_FIELDS) {
@@ -588,6 +591,35 @@ function isNativeOpenAIChatTarget(provider: OcxProviderConfig): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Chat passthrough whitelists fields, so caller message roles ride through untouched. The
+ * `developer` role is OpenAI-exclusive wire vocabulary: strict OpenAI-compatible backends
+ * reject it outright (Zhipu GLM answers HTTP 400 code 1214 "Incorrect role information"),
+ * while clients sitting behind the proxy can only see this proxy's endpoint — not the
+ * upstream host — so their OpenAI-host detection never fires and they send `developer`
+ * whenever they would send it to OpenAI itself. The translated Chat path already gates
+ * developer messages behind `isNativeOpenAIChatTarget`; the passthrough must normalize to
+ * `system` the same way instead of forwarding vocabulary the upstream never agreed to
+ * accept. Semantic loss is minimal: `developer` carries instructions, and `system` is the
+ * instruction channel on every non-OpenAI chat backend.
+ */
+function normalizePassthroughDeveloperRoles(provider: OcxProviderConfig, messages: unknown): unknown {
+  if (isNativeOpenAIChatTarget(provider) || !Array.isArray(messages)) return messages;
+  let hasDeveloper = false;
+  for (const msg of messages) {
+    if ((msg as { role?: unknown } | null)?.role === "developer") {
+      hasDeveloper = true;
+      break;
+    }
+  }
+  if (!hasDeveloper) return messages;
+  return messages.map((msg) => {
+    const rec = msg as Record<string, unknown> | null;
+    if (rec?.role !== "developer") return msg;
+    return { ...rec, role: "system" };
+  });
 }
 
 /**
