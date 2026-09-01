@@ -173,25 +173,28 @@ describe("provider registry parity", () => {
     expect((routeModel(makeConfig(300_000), "openai-apikey/gpt-5.6-sol").provider as unknown as { virtualModels?: unknown }).virtualModels).toBeUndefined();
   });
 
-  test("glm-5.3-flash is a native VLM: the zai row advertises image without sidecar coverage", () => {
-    // The zai coding-plan entry is the ONLY carrier of glm-5.3-flash that had no
-    // modelInputModalities declaration. flash is deliberately excluded from noVisionModels
-    // (it reads images itself), so the declaration below is the only image evidence —
-    // without it the row advertised text-only while its text-only siblings advertised
-    // image through the sidecar, exactly inverted.
-    const entry = PROVIDER_REGISTRY.find(e => e.id === "zai")!;
-    expect(entry.modelInputModalities?.["glm-5.3-flash"]).toEqual(["text", "image"]);
-    // Not a sidecar consumer: the vision sidecar must never describe images a native VLM reads itself.
-    expect(entry.noVisionModels).not.toContain("glm-5.3-flash");
+  test("glm-5.3-flash is a native VLM: every static carrier advertises image without sidecar coverage", () => {
+    // flash is deliberately excluded from every carrier's noVisionModels (it reads images
+    // itself), so a carrier that lists flash but declares no modelInputModalities leaves the
+    // row with NO image evidence: it advertised text-only while its text-only siblings
+    // advertised image through the sidecar — exactly inverted. ollama-cloud is the deliberate
+    // exception: its /api/show enrichment owns native vision dynamically.
+    const staticCarriers = ["zai", "zhipu-bigmodel-coding", "neuralwatt"];
+    for (const id of staticCarriers) {
+      const entry = PROVIDER_REGISTRY.find(e => e.id === id)!;
+      expect(entry.models).toContain("glm-5.3-flash");
+      expect(entry.modelInputModalities?.["glm-5.3-flash"]).toEqual(["text", "image"]);
+      expect(entry.noVisionModels).not.toContain("glm-5.3-flash");
 
-    const prov: OcxProviderConfig = {
-      adapter: "openai-chat",
-      baseUrl: "https://api.z.ai/api/coding/paas/v4",
-      models: ["glm-5.3", "glm-5.3-flash"],
-    };
-    enrichProviderFromRegistry("zai", prov);
-    expect(applyProviderConfigHints("zai", prov, { id: "glm-5.3-flash" } as never).inputModalities)
-      .toEqual(expect.arrayContaining(["text", "image"]));
+      const prov: OcxProviderConfig = {
+        adapter: "openai-chat",
+        baseUrl: entry.baseUrl,
+        models: [...entry.models!],
+      };
+      enrichProviderFromRegistry(id, prov);
+      expect(applyProviderConfigHints(id, prov, { id: "glm-5.3-flash" } as never).inputModalities)
+        .toEqual(expect.arrayContaining(["text", "image"]));
+    }
   });
 
   test("non-API route max-input metadata keeps user overrides and fills registry defaults", () => {

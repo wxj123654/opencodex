@@ -1581,6 +1581,10 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     thinkingBudgetModels: THINKING_BUDGET_MODELS,
     noReasoningModels: ["glm-5.3-fast", "glm-5.3-short-fast", "glm-5.2-fast", "glm-5.2-short-fast", "kimi-k2.6-fast", "qwen3.5-397b-fast", "qwen3.6-35b-fast"],
     noVisionModels: ["glm-5.3", "glm-5.3-fast", "glm-5.3-short", "glm-5.3-short-fast", "glm-5.2", "glm-5.2-fast", "glm-5.2-short", "glm-5.2-short-fast", "qwen3.5-397b", "qwen3.5-397b-fast"],
+    // glm-5.3-flash is deliberately absent from noVisionModels (native VLM it reads images
+    // for itself), and the aggregator's /v1/models rows carry no modality fields, so this
+    // static declaration is the offline fallback's only image evidence.
+    modelInputModalities: { "glm-5.3-flash": ["text", "image"] },
     noTemperatureModels: ["kimi-k2.7-code"],
     noTopPModels: ["kimi-k2.7-code"],
     noPenaltyModels: ["kimi-k2.7-code"],
@@ -2369,6 +2373,10 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     modelContextWindows: { "glm-5.3": 1_000_000, "glm-5.3[1m]": 1_000_000, "glm-5.3-flash": 1_000_000, "glm-5.2": 1_000_000, "glm-5.2[1m]": 1_000_000 },
     modelSuffixBracketStrip: true,
     noVisionModels: ZAI_GLM_5X_SIDECAR_VISION_MODELS,
+    // Same inversion as the zai row: flash is deliberately excluded from noVisionModels
+    // (native VLM, docs.z.ai/guides/vlm/glm-5.3-flash), so this is the only image evidence
+    // for the coding-plan roster.
+    modelInputModalities: { "glm-5.3-flash": ["text", "image"] },
     modelReasoningEfforts: ZAI_GLM_5X_REASONING_EFFORTS,
     modelSupportsReasoningSummaries: Object.fromEntries(ZAI_GLM_5X_MODELS.map(id => [id, true])),
     preserveReasoningContentModels: ZAI_GLM_5X_MODELS,
