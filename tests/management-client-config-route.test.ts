@@ -217,6 +217,10 @@ describe("GET /api/client-config", () => {
   }, 15_000);
 
   test("ZCode response preserves management reasoning metadata", async () => {
+    // Native OpenAI rows export only when entitlements are seeded; the DSH test
+    // above happens to seed the same id, but relying on that ordering was the
+    // fragile pre-sync shape that broke when upstream tightened native visibility.
+    seedCodexModelEntitlementsForTests("main", ["gpt-5.6-luna"]);
     const response = await clientConfigApi(baseConfig(), "?client=zcode");
     expect(response.status).toBe(200);
     const body = await response.json() as ClientConfigEnvelope;
