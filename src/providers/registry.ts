@@ -2282,6 +2282,12 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     // Z.AI's OpenAI path returns 400 code 1211 for bracketed model ids.
     modelSuffixBracketStrip: true,
     noVisionModels: ZAI_GLM_5X_SIDECAR_VISION_MODELS,
+    // glm-5.3-flash is a native VLM (docs.z.ai/guides/vlm/glm-5.3-flash) and is deliberately
+    // excluded from noVisionModels, so this declaration is the ONLY source of its image
+    // evidence. Without it the row advertised text-only while its text-only siblings
+    // advertised image through the sidecar — exactly inverted. Every other carrier of this
+    // id (alibaba token plan, volcengine plan, zhipu-bigmodel) declares the same mapping.
+    modelInputModalities: { "glm-5.3-flash": ["text", "image"] },
     modelReasoningEfforts: ZAI_GLM_5X_REASONING_EFFORTS,
     modelDefaultReasoningEfforts: Object.fromEntries(ZAI_GLM_53_MODELS.map(id => [id, "max"])),
     modelMaxOutputTokens: Object.fromEntries(ZAI_GLM_53_MODELS.map(id => [id, 131_072])),
