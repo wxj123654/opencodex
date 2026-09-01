@@ -13,8 +13,9 @@
  *   through the environment. AGENTS.md treats token serialization as a release blocker.
  * - **No metadata is guessed.** A model with no authoritative context window ships
  *   without context/output fields, and the client applies its own defaults. Pi's `cost`
- *   is omitted entirely rather than zero-filled, because zeros would assert "free",
- *   which is false for routed providers.
+ *   is zero-filled rather than omitted: pi's extension re-registration path applies no
+ *   default cost, so an absent field crashes pi's usage accounting on the first
+ *   successful stream.
  *
  * This module never writes a file. `destination` names the canonical path for a human;
  * targeting it is the caller's explicit act.
@@ -740,6 +741,15 @@ export interface PiModelEntry {
   id: string;
   name: string;
   input: string[];
+  /**
+   * Required, not optional: pi fills in a default cost only for models loaded
+   * from models.json itself. Extensions that re-register a provider's models
+   * (pi-setup-custom-providers does this for every provider in the file) pass
+   * the rows through pi's extension path, which applies no default — and the
+   * first successful stream then crashes calculating usage cost. A zero row
+   * is the honest value for a local proxy: the proxy meters upstream, not pi.
+   */
+  cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
   contextWindow?: number;
   maxTokens?: number;
   /** Advertised when the catalog row carries a non-empty effort ladder. */
@@ -757,6 +767,15 @@ export interface PiProviderBlock {
   baseUrl: string;
   api: string;
   apiKey: string;
+  /**
+   * Pi defaults reasoning-capable models to OpenAI's `developer` role, but the
+   * OpenAI-compatible upstreams behind the proxy are inconsistent about accepting it:
+   * z.ai's glm-5.3-flash answers `developer` with 400 "Incorrect role information"
+   * while glm-5.3 takes it. Pi's own escape hatch for this is provider-level
+   * `compat.supportsDeveloperRole`, so we pin the portable `system` role for every
+   * routed model instead of guessing per upstream.
+   */
+  compat: { supportsDeveloperRole: false };
   models: PiModelEntry[];
 }
 
@@ -984,14 +1003,18 @@ export interface ZcodeGeneratedConfig {
  * Pi's `~/.pi/agent/models.json` shape. `models` is an ARRAY (identity lives in `id`),
  * unlike OpenCode's keyed object.
  *
- * Two fields were deliberately absent once. `cost` still is: it requires all four price
- * fields and we have no price data at all, so emitting zeros would assert every routed
- * model is free. `reasoning` used to be omitted because Pi's boolean and the catalog's
- * effort ladder did not obviously map — but a NON-EMPTY ladder is the catalog's own
+ * Two fields have a history. `reasoning` used to be omitted because Pi's boolean and the
+ * catalog's effort ladder did not obviously map — but a NON-EMPTY ladder is the catalog's own
  * statement that the model accepts reasoning parameters (adapters honor `reasoning_effort`),
  * and an empty or absent ladder is the statement that it does not. Emitting `reasoning:
  * true` exactly for rows with a ladder is therefore not a guess; it is what makes Pi's
- * effort control appear for routed models at all. The export also emits a `thinkingLevelMap`
+ * effort control appear for routed models at all. `cost` used to be omitted because we
+ * have no price data and zeros would assert every routed model is free — but omitting it
+ * is worse: extensions that re-register models.json providers (pi-setup-custom-providers
+ * registers every provider in the file) push the rows through pi's extension path, which
+ * applies no default cost, and the first successful stream crashes with
+ * `Cannot read properties of undefined (reading 'tiers')`. A zero cost row is now emitted
+ * for every model; for a local proxy that is also the truthful number. The export also emits a `thinkingLevelMap`
  * that hides every pi level outside the declared ladder, so pi never offers (and sends) an
  * effort the ladder does not contain — custom-row ladders are catalog advertisement only
  * and get no wire clamp, so this map is what keeps pi honest for those. Users who need a
@@ -1000,8 +1023,8 @@ export interface ZcodeGeneratedConfig {
  * Pi's input enum IS verified: its documented model configuration accepts only
  * `text` and `image`, and a validation failure yields an EMPTY model config
  * rather than dropping the offending entry — one bad value costs every routed
- * model. The rest of this contract (omitting `cost`) is still ours rather than
- * a claim about Pi's acceptance.
+ * model. The rest of this contract (omitting `name` when the id suffices) is
+ * still ours rather than a claim about Pi's acceptance.
  */
 function buildPiClientConfig(ctx: ExportContext): PiGeneratedConfig {
   const models: PiModelEntry[] = [];
@@ -1017,6 +1040,7 @@ function buildPiClientConfig(ctx: ExportContext): PiGeneratedConfig {
       id: model.namespaced,
       name: exportModelLabel(model),
       input,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     };
     if (Array.isArray(model.reasoningEfforts) && model.reasoningEfforts.length > 0) {
       entry.reasoning = true;
@@ -1046,6 +1070,7 @@ function buildPiClientConfig(ctx: ExportContext): PiGeneratedConfig {
         baseUrl: ctx.baseUrl,
         api: PI_API_DIALECT,
         apiKey: LOOPBACK_API_KEY_PLACEHOLDER,
+        compat: { supportsDeveloperRole: false },
         models,
       },
     },
@@ -1066,6 +1091,7 @@ function buildOmpClientConfig(ctx: ExportContext): OmpGeneratedConfig {
       id: model.namespaced,
       name: exportModelLabel(model),
       input,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       ...(model.native && model.provider === "openai" ? { api: "openai-responses" } : {}),
     };
     const context = authoritativeContextWindow(model.contextWindow);

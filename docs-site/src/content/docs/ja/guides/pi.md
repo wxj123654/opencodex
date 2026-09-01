@@ -23,6 +23,7 @@ ocx export --client pi
       "baseUrl": "http://127.0.0.1:10100/v1",
       "api": "openai-completions",
       "apiKey": "$OPENCODEX_API_KEY",
+      "compat": { "supportsDeveloperRole": false },
       "models": [
         {
           "id": "anthropic/claude-opus-5",
@@ -83,12 +84,14 @@ export OPENCODEX_API_KEY=<your key>
 
 `maxTokens` は、`32000` のスキーマを満たすバジェットであり、コンテキスト ウィンドウに固定されているため、小さなコンテキスト モデルにはコンテキストを超える出力が与えられません。これは、特定のモデルの真の最大値について主張するものではありません。
 
-2 つのフィールドは意図的に省略されています。 `cost` には 4 つの価格フィールドがすべて必要ですが、opencodex にはルーティング モデルの価格データがありません。ゼロを出力すると、すべてのモデルが無料であると主張されます。 `reasoning` は Pi のブール値ですが、カタログにはエフォート ラダーが記載されており、一方をもう一方にマッピングするのは推測になります。
+すべての行には、明示的なゼロの `cost` が含まれます。opencodex にはルーティング モデルの価格データがありませんが、フィールドを省略することはゼロを出力するよりも悪い結果をもたらします。pi は models.json 自体から読み込んだモデルにのみ既定の `cost` を適用します。一方、providers を再登録する拡張機能（ファイル内のすべての provider を再登録する pi-setup-custom-providers など）は、既定値のない行を pi の拡張パスに通します。その状態で最初のストリームが成功すると、使用量コストの計算で `Cannot read properties of undefined (reading 'tiers')` でクラッシュします。ローカル プロキシにとってゼロは、実際にも正確な数値です。計上するのは pi ではなくプロキシ側だからです。
+
+`reasoning` も経緯のあるフィールドです。以前は省略されていました。Pi はブール値を保存しますが、カタログにはエフォート ラダーが記載されており、一方をもう一方にマッピングするのは推測になるためです。
 
 ## スキーマのステータス
 
-:::note[実際のインストールに対して未検証]
-上の形状は、Pi が公開しているカスタム プロバイダーのドキュメントに従っています。 Pi がインストールされたマシン上の実際の `~/.pi/agent/models.json` に対して検証されていません**。 Pi がエクスポートされたブロックを拒否した場合、不一致は私たちの側にあります。Pi が報告した内容を [問題を開く](https://github.com/lidge-jun/opencodex/issues) してください。
+:::note[実際のインストールに対して検証済み]
+この形状は、pi 0.84.3 の実際の `~/.pi/agent/models.json`（2026-08）に対して検証されています。検証では、上記のゼロ `cost` の理由となった相互作用も確認されました。pi-setup-custom-providers はファイル内のすべての provider を再登録し、pi はそのパスに既定の cost を適用しないため、`cost` のない行は最初の成功したストリームで pi の使用量計算をクラッシュさせました。`reasoning`、`thinkingLevelMap`、およびレベルを隠す `null` エントリは、そのインストールで文書どおりに動作しました。新しい pi または拡張機能がこれを変更した場合は、pi が報告した内容を [問題を開く](https://github.com/lidge-jun/opencodex/issues) してください。
 :::
 
 ## 要件

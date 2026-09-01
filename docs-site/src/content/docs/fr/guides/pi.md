@@ -27,6 +27,7 @@ d’exportation de la variable d’environnement et le nombre de modèles dotés
       "baseUrl": "http://127.0.0.1:10100/v1",
       "api": "openai-completions",
       "apiKey": "$OPENCODEX_API_KEY",
+      "compat": { "supportsDeveloperRole": false },
       "models": [
         {
           "id": "anthropic/claude-opus-5",
@@ -102,11 +103,15 @@ faisant autorité. Dans le cas contraire, les deux champs sont omis pour ce mod�
 modèle doté d’un petit contexte ne reçoive jamais davantage de sortie que de contexte. Cette valeur ne constitue pas une affirmation sur la
 limite maximale réelle d’un modèle donné.
 
-Le champ `cost` est volontairement absent. Il exige les quatre champs de prix, alors qu’OpenCodex ne possède
-aucune donnée tarifaire pour les modèles routés ; émettre des zéros reviendrait à affirmer que tous les
-modèles sont gratuits.
+Chaque ligne comporte un `cost` explicite à zéro. OpenCodex ne possède aucune donnée tarifaire pour les
+modèles routés, mais omettre le champ est pire qu’émettre des zéros : pi n’applique un coût par défaut
+qu’aux modèles qu’il charge lui-même depuis models.json, tandis que les extensions qui réenregistrent les
+fournisseurs — notamment pi-setup-custom-providers, qui réenregistre chaque fournisseur du fichier —
+font passer les lignes par le chemin d’extension de pi, sans valeur par défaut. Le premier flux réussi
+fait alors planter le calcul du coût d’usage avec `Cannot read properties of undefined (reading 'tiers')`.
+Pour un proxy local, zéro est aussi la valeur exacte : la facturation a lieu en amont, pas dans pi.
 
-`reasoning`, autrefois absent, est désormais émis. Pi stocke un booléen tandis que le catalogue possède une
+`reasoning` a lui aussi une histoire : il était autrefois absent parce que Pi stocke un booléen tandis que le catalogue possède une
 échelle d’effort ; cette correspondance était auparavant trop incertaine. Puisque l’échelle du catalogue
 indique maintenant si le proxy accepte les paramètres de raisonnement — les adaptateurs respectent
 `reasoning_effort` — une ligne exportée avec une échelle **non vide** reçoit `"reasoning": true`. Une ligne
@@ -127,11 +132,15 @@ propose ce contrôle.
 
 ## Statut du schéma
 
-:::note[Non vérifié sur une installation réelle]
-La forme ci-dessus suit la documentation publiée par le fournisseur personnalisé de Pi. Il n'a **pas** été vérifié
-sur un véritable fichier `~/.pi/agent/models.json`, sur une machine où Pi est installé. Si Pi rejette le bloc
-exporté, l’incompatibilité vient de notre côté : veuillez
-[ouvrir un ticket](https://github.com/lidge-jun/opencodex/issues) en indiquant le message renvoyé par Pi.
+:::note[Vérifié sur une installation réelle]
+Cette forme a été éprouvée sur un véritable `~/.pi/agent/models.json` sous pi 0.84.3 (2026-08),
+y compris l’interaction qui a motivé le `cost` à zéro ci-dessus : pi-setup-custom-providers
+réenregistre chaque fournisseur du fichier, pi n’applique aucun coût par défaut sur ce chemin,
+et les lignes sans `cost` faisaient planter la comptabilisation d’usage de pi dès le premier
+flux réussi. `reasoning`, `thinkingLevelMap` et les entrées `null` de masquage des niveaux se
+sont toutes comportées comme documenté sur cette installation. Si une version plus récente de
+pi ou de l’extension change cela, veuillez
+[ouvrir un ticket](https://github.com/lidge-jun/opencodex/issues) en indiquant le message renvoyé par pi.
 :::
 
 ## Exigences

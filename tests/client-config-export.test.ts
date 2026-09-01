@@ -173,13 +173,21 @@ describe("Pi serializer (accept criterion 2)", () => {
     expect(provider.baseUrl).toBe(BASE_URL);
     expect(provider.api).toBe("openai-completions");
     expect(provider.apiKey).toBe(LOOPBACK_API_KEY_PLACEHOLDER);
+    // Pi sends OpenAI's `developer` role for reasoning-capable models unless the
+    // provider opts out. Upstream acceptance is uneven (z.ai's glm-5.3-flash 400s
+    // on it, glm-5.3 accepts it), so the export pins the portable `system` role.
+    expect(provider.compat).toEqual({ supportsDeveloperRole: false });
   });
 
-  test("cost is omitted on every entry — zeros would assert routed models are free", () => {
+  test("every entry carries an explicit zero cost — pi's extension path applies no default", () => {
+    // pi fills a default cost only for models it loads from models.json itself.
+    // Extensions that re-register providers (pi-setup-custom-providers registers
+    // every provider in the file) pass the rows through the extension path
+    // undefaulted, and the first successful stream then crashes calculating
+    // usage cost: `Cannot read properties of undefined (reading 'tiers')`.
     for (const model of piConfig().providers.opencodex!.models) {
-      expect(model).not.toHaveProperty("cost");
+      expect(model.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
     }
-    expect(JSON.stringify(piConfig())).not.toContain("cost");
   });
 
   test("reasoning is emitted only for rows with a non-empty effort ladder", () => {
@@ -238,7 +246,12 @@ describe("Pi serializer (accept criterion 2)", () => {
     const entry = piConfig().providers.opencodex!.models.find(model => model.id === "custom/no-context")!;
     expect(entry).not.toHaveProperty("contextWindow");
     expect(entry).not.toHaveProperty("maxTokens");
-    expect(entry).toEqual({ id: "custom/no-context", name: "no-context (custom)", input: ["text"] });
+    expect(entry).toEqual({
+      id: "custom/no-context",
+      name: "no-context (custom)",
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    });
   });
 
   test("maxTokens uses the schema budget and clamps to a smaller context window", () => {
@@ -581,6 +594,9 @@ describe("EXPORT_CLIENTS registry", () => {
       "baseUrl": "http://127.0.0.1:10100/v1",
       "api": "openai-completions",
       "apiKey": "opencodex-loopback",
+      "compat": {
+        "supportsDeveloperRole": false
+      },
       "models": [
         {
           "id": "anthropic/claude-opus-5",
@@ -588,6 +604,12 @@ describe("EXPORT_CLIENTS registry", () => {
           "input": [
             "text"
           ],
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
           "contextWindow": 200000,
           "maxTokens": 32000
         },
@@ -596,7 +618,13 @@ describe("EXPORT_CLIENTS registry", () => {
           "name": "no-context (custom)",
           "input": [
             "text"
-          ]
+          ],
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          }
         },
         {
           "id": "gpt-5.6-luna",
@@ -604,6 +632,12 @@ describe("EXPORT_CLIENTS registry", () => {
           "input": [
             "text"
           ],
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
           "contextWindow": 272000,
           "maxTokens": 32000
         },
@@ -613,6 +647,12 @@ describe("EXPORT_CLIENTS registry", () => {
           "input": [
             "text"
           ],
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
           "contextWindow": 8000,
           "maxTokens": 8000
         }

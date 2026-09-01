@@ -27,6 +27,7 @@ ocx export --client pi
       "baseUrl": "http://127.0.0.1:10100/v1",
       "api": "openai-completions",
       "apiKey": "$OPENCODEX_API_KEY",
+      "compat": { "supportsDeveloperRole": false },
       "models": [
         {
           "id": "anthropic/claude-opus-5",
@@ -103,17 +104,26 @@ export OPENCODEX_API_KEY=<your key>
 잡히지 않도록 아래로 잘립니다. 즉, 작은 context 모델에 그보다 많은 출력을 주겠다는
 의미가 아닙니다.
 
-의도적으로 빠진 필드도 두 개 있습니다. `cost`는 네 개의 가격 필드가 모두 있어야
-하는데, opencodex는 라우팅된 모델의 가격 데이터를 갖고 있지 않습니다. 0을 넣으면
-모든 모델이 무료라고 주장하는 꼴이 됩니다. `reasoning`은 Pi에서는 boolean이지만
-카탈로그는 effort 단계 체계를 들고 있으므로, 둘을 1:1로 맞추는 것은 추측입니다.
+모든 행에는 명시적인 0 `cost`가 들어갑니다. opencodex에는 라우팅된 모델의 가격 데이터가
+없지만, 필드를 아예 빼는 것이 0을 넣는 것보다 나쁜 결과를 낳습니다. pi는 models.json에서
+직접 읽어 들인 모델에만 기본 `cost`를 채워 넣고, provider를 다시 등록하는 확장(파일 안의
+모든 provider를 다시 등록하는 pi-setup-custom-providers 등)은 기본값 없이 행을 pi의
+확장 경로에 통과시킵니다. 그 상태에서 첫 번째 스트림이 성공하면 사용량 비용 계산에서
+`Cannot read properties of undefined (reading 'tiers')`로 깨집니다. 로컬 프록시에게 0은
+실제로도 올바른 값입니다. 과금을 계산하는 쪽은 pi가 아니라 프록시이기 때문입니다.
+
+`reasoning`도 역사가 있는 필드입니다. 예전에는 빠져 있었습니다. Pi는 boolean을 저장하지만
+카탈로그는 effort 단계 체계를 들고 있으므로, 둘을 1:1로 맞추는 것은 추측이었기 때문입니다.
 
 ## 스키마 상태
 
-:::note[실제 설치에서 검증하지 않음]
-위의 형태는 Pi가 공개한 custom-provider 문서를 따른 것입니다. Pi가 설치된 머신의
-실제 `~/.pi/agent/models.json`으로는 아직 검증하지 않았습니다. Pi가 내보낸 블록을
-거부하면 문제는 우리 쪽에 있습니다. Pi가 무엇을 보고했는지와 함께
+:::note[실제 설치에서 검증함]
+이 형태는 pi 0.84.3의 실제 `~/.pi/agent/models.json`(2026-08)으로 검증되었습니다. 검증
+과정에서 위의 0 `cost`가 생긴 경위도 확인되었습니다. pi-setup-custom-providers가 파일 안의
+모든 provider를 다시 등록하고, pi는 그 경로에서 기본 cost를 채워 넣지 않기 때문에 `cost`
+없는 행은 첫 번째 성공한 스트림에서 pi의 사용량 계산을 깨뜨렸습니다. `reasoning`,
+`thinkingLevelMap`, 레벨을 숨기는 `null` 항목 모두 그 설치에서 문서대로 동작했습니다. 더
+새로운 pi나 확장이 이를 바꾼다면, pi가 보고한 내용과 함께
 [issue를 열어주세요](https://github.com/lidge-jun/opencodex/issues).
 :::
 

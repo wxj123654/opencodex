@@ -27,11 +27,13 @@ export line, and how many models carry authoritative context limits.
       "baseUrl": "http://127.0.0.1:10100/v1",
       "api": "openai-completions",
       "apiKey": "$OPENCODEX_API_KEY",
+      "compat": { "supportsDeveloperRole": false },
       "models": [
         {
           "id": "anthropic/claude-opus-5",
           "name": "Claude Opus 5 (anthropic)",
           "input": ["text"],
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
           "contextWindow": 200000,
           "maxTokens": 32000
         }
@@ -40,6 +42,13 @@ export line, and how many models carry authoritative context limits.
   }
 }
 ```
+
+The provider-level `compat.supportsDeveloperRole: false` matters once a model carries
+`reasoning: true`: pi then defaults to OpenAI's `developer` role, and upstream acceptance of
+that role is uneven behind the proxy — z.ai's glm-5.3-flash answers it with
+`400 Incorrect role information` while glm-5.3 accepts it. Pinning the portable `system`
+role costs nothing on the endpoints that do accept `developer` and unbreaks the ones that
+don't.
 
 Model ids are the proxy's canonical selectors, so routed models appear as `provider/model`
 (`anthropic/claude-opus-5`) and native OpenAI slugs stay unprefixed (`gpt-5.6-sol`). The `name`
@@ -102,11 +111,16 @@ window. When it does not, both fields are omitted for that model and Pi applies 
 small-context model is never given more output than context. It is not a claim about any specific
 model's true maximum.
 
-Two fields are deliberately absent. `cost` requires all four price fields and opencodex has no
-price data for routed models — emitting zeros would assert that every model is free.
+Every row carries an explicit zero `cost`. opencodex has no price data for routed models, and
+omitting the field is worse than emitting zeros: pi fills in a default cost only for models it
+loads from models.json itself, while extensions that re-register providers — notably
+pi-setup-custom-providers, which re-registers every provider in the file — pass the rows through
+pi's extension path with no default. The first successful stream then crashes calculating usage
+cost with `Cannot read properties of undefined (reading 'tiers')`. For a local proxy, zero is
+also the truthful number: the proxy meters upstream, not pi.
 
-`reasoning` is the one field that used to be absent and now is not: Pi stores a boolean while the
-catalog carries an effort ladder, and mapping one onto the other used to be a guess. Since the
+`reasoning` is the other field with a history: it used to be absent because Pi stores a boolean
+while the catalog carries an effort ladder, and mapping one onto the other used to be a guess. Since the
 catalog's ladder is the proxy's own statement about whether a model accepts reasoning parameters
 (adapters honor `reasoning_effort`), an export row with a **non-empty** ladder now emits
 `"reasoning": true`, and a row without one (or with an explicitly empty ladder) stays
@@ -126,11 +140,14 @@ all.
 
 ## Schema status
 
-:::note[Unverified against a real install]
-The shape above follows Pi's published custom-provider documentation. It has **not** been verified
-against a real `~/.pi/agent/models.json` on a machine with Pi installed. If Pi rejects the exported
-block, the mismatch is on our side — please
-[open an issue](https://github.com/lidge-jun/opencodex/issues) with what Pi reported.
+:::note[Verified against a real install]
+This shape has been exercised against a real `~/.pi/agent/models.json` on pi 0.84.3 (2026-08),
+including the interaction that shaped the zero `cost` above: pi-setup-custom-providers
+re-registers every provider in the file, pi applies no default cost on that path, and rows
+without a `cost` crashed pi's usage accounting on the first successful stream. `reasoning`,
+`thinkingLevelMap`, and the level-hiding `null` entries all behaved as documented on that
+install. If a newer pi or extension changes this, please
+[open an issue](https://github.com/lidge-jun/opencodex/issues) with what pi reported.
 :::
 
 ## Requirements
