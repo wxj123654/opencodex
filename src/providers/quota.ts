@@ -90,6 +90,8 @@ const VENICE_BASE_URL = "https://api.venice.ai/api/v1";
 const SYNTHETIC_BASE_URL = "https://api.synthetic.new/v2";
 const DEEPINFRA_BASE_URL = "https://api.deepinfra.com";
 const NEURALWATT_BASE_URL = "https://api.neuralwatt.com/v1";
+const ELECTRONHUB_BASE_URL = "https://api.electronhub.ai/v1";
+const ELECTRONHUB_USAGE_URL = `${ELECTRONHUB_BASE_URL}/user/me`;
 const XAI_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing";
 const XAI_CREDITS_URL = `${XAI_BILLING_URL}?format=credits`;
 /** Keep a failed probe's previous row at most this long before dropping it. */
@@ -353,6 +355,12 @@ function isCanonicalNeuralwattBaseUrl(baseUrl: string): boolean {
   return normalizedBaseUrl(baseUrl) === NEURALWATT_BASE_URL;
 }
 
+function isCanonicalElectronHubBaseUrl(baseUrl: string): boolean {
+  const normalized = normalizedBaseUrl(baseUrl);
+  return normalized === ELECTRONHUB_BASE_URL
+    || normalized === "https://api.electronhub.ai";
+}
+
 function a6apiPayload(value: unknown): Record<string, unknown> | null {
   const body = asRecord(value);
   return asRecord(body?.data) ?? body;
@@ -592,6 +600,156 @@ async function fetchDeepSeekQuota(provider: string, config: OcxProviderConfig): 
     customWindows: [{ label, percent: 0 }],
     updatedAt: Date.now(),
   });
+}
+
+function electronHubLooksLikeCodingPlan(data: Record<string, unknown>): boolean {
+  const subscription = typeof data.subscription === "string" ? data.subscription.toLowerCase() : "";
+  if (/(coding|devpass|dev[_\s-]?pass)/.test(subscription)) return true;
+  // Lite/Turbo are Coding Plan tier names, but only when the payload is not an ordinary
+  // credit subscription (free/starter/plus/core/pro/business/enterprise).
+  if (/(^|[\s_-])(lite|turbo)([\s_-]|$)/.test(subscription)
+    && !/(free|starter|plus|core|pro|business|enterprise)/.test(subscription)) {
+    return true;
+  }
+  const codingPlan = asRecord(data.coding_plan) ?? asRecord(data.codingPlan) ?? asRecord(data.devpass);
+  if (codingPlan) return true;
+  if (data.unlimited === true || data.unlimited_tokens === true || data.unlimitedTokens === true) return true;
+  const credits = data.credits;
+  // Documented Coding Plan never consumes credits. When the payload omits credits entirely
+  // (or reports null) AND does not name a credit-tier subscription, treat it as DevPass
+  // rather than inventing a zero balance.
+  if ((credits === null || credits === undefined)
+    && !/(free|starter|plus|core|pro|business|enterprise)/.test(subscription)) {
+    return true;
+  }
+  return false;
+}
+
+function electronHubHeadroomPercent(source: Record<string, unknown>, keys: string[]): number | undefined {
+  for (const key of keys) {
+    const direct = normalizePercent(source[key]);
+    if (direct !== undefined) return direct;
+    const nested = asRecord(source[key]);
+    if (!nested) continue;
+    const percent = normalizePercent(
+      nested.percent_used
+      ?? nested.percentUsed
+      ?? nested.used_percent
+      ?? nested.usedPercent
+      ?? nested.percentage
+      ?? nested.percent,
+    );
+    if (percent !== undefined) return percent;
+  }
+  return undefined;
+}
+
+function electronHubHeadroomResetAt(source: Record<string, unknown>, keys: string[]): number | undefined {
+  for (const key of keys) {
+    const nested = asRecord(source[key]);
+    if (!nested) continue;
+    const resetAt = normalizeResetAt(
+      nested.reset_at
+      ?? nested.resetAt
+      ?? nested.resets_at
+      ?? nested.resetsAt
+      ?? nested.next_reset
+      ?? nested.nextReset
+      ?? nested.next_reset_at
+      ?? nested.nextResetAt,
+    );
+    if (resetAt !== undefined) return resetAt;
+  }
+  return undefined;
+}
+
+/**
+ * Electron Hub Coding Plan `GET /v1/user/me` — documented as subscription + credits +
+ * lifetime token usage. Coding Plan (DevPass) itself is unlimited tokens with soft
+ * full-speed headroom; when the payload looks like that plan we report an unlimited
+ * credits window. Soft headroom fields are optional and only mapped when present so
+ * we never invent daily/weekly utilization from lifetime token counters.
+ */
+async function fetchElectronHubQuota(provider: string, config: OcxProviderConfig): Promise<ProviderQuotaProbeResult> {
+  if (!isCanonicalElectronHubBaseUrl(config.baseUrl)) return null;
+  const apiKey = resolveProviderApiKey(config.apiKey)?.trim();
+  if (!apiKey) return null;
+  const response = await fetch(ELECTRONHUB_USAGE_URL, {
+    headers: { Accept: "application/json", Authorization: `Bearer ${apiKey}` },
+    redirect: "error",
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    return response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429
+      ? TERMINAL_QUOTA_FAILURE
+      : null;
+  }
+  const body = asRecord(await readQuotaJson(response));
+  const data = asRecord(body?.data) ?? body;
+  if (!data) return null;
+
+  const quota: ProviderQuota = { updatedAt: Date.now() };
+  let windows = 0;
+  const headroomSource = asRecord(data.headroom)
+    ?? asRecord(data.fair_use)
+    ?? asRecord(data.fairUse)
+    ?? asRecord(data.coding_plan)
+    ?? asRecord(data.codingPlan)
+    ?? asRecord(data.devpass)
+    ?? data;
+  const dailyPercent = electronHubHeadroomPercent(headroomSource, [
+    "daily", "daily_headroom", "dailyHeadroom", "full_speed_daily", "fullSpeedDaily",
+  ]);
+  if (dailyPercent !== undefined) {
+    quota.fiveHourPercent = dailyPercent;
+    const resetAt = electronHubHeadroomResetAt(headroomSource, [
+      "daily", "daily_headroom", "dailyHeadroom", "full_speed_daily", "fullSpeedDaily",
+    ]);
+    if (resetAt !== undefined) quota.fiveHourResetAt = resetAt;
+    windows += 1;
+  }
+  const weeklyPercent = electronHubHeadroomPercent(headroomSource, [
+    "weekly", "weekly_headroom", "weeklyHeadroom", "full_speed_weekly", "fullSpeedWeekly",
+  ]);
+  if (weeklyPercent !== undefined) {
+    quota.weeklyPercent = weeklyPercent;
+    const resetAt = electronHubHeadroomResetAt(headroomSource, [
+      "weekly", "weekly_headroom", "weeklyHeadroom", "full_speed_weekly", "fullSpeedWeekly",
+    ]);
+    if (resetAt !== undefined) quota.weeklyResetAt = resetAt;
+    windows += 1;
+  }
+
+  if (electronHubLooksLikeCodingPlan(data)) {
+    const subscription = typeof data.subscription === "string" && data.subscription.trim()
+      ? data.subscription.trim()
+      : "Coding Plan";
+    quota.creditsUsd = {
+      used: 0,
+      limit: 0,
+      remaining: 0,
+      percent: 0,
+      unlimited: true,
+    };
+    quota.customWindows = [
+      ...(quota.customWindows ?? []),
+      { label: `${subscription} (unlimited tokens)`, percent: 0 },
+    ];
+    windows += 1;
+  } else {
+    const credits = toFiniteNumber(data.credits);
+    if (credits !== undefined && credits >= 0) {
+      // Documented `/user/me` only exposes remaining credits, not the weekly grant ceiling,
+      // so this stays a balance-only window (same honesty rule as DeepSeek).
+      quota.customWindows = [
+        ...(quota.customWindows ?? []),
+        { label: `API credits (${credits} remaining)`, percent: 0 },
+      ];
+      windows += 1;
+    }
+  }
+
+  return windows > 0 ? report(provider, "electronhub:user-me", quota) : null;
 }
 
 /**
@@ -2283,6 +2441,11 @@ async function maybeFetchProviderQuota(
     }
     if ((provider.authMode ?? "key") === "key" && name === "deepseek") {
       return fetchDeepSeekQuota(name, provider);
+    }
+    if ((provider.authMode ?? "key") === "key"
+      && (name === "electronhub-coding-plan" || name === "electronhub")
+      && isCanonicalElectronHubBaseUrl(provider.baseUrl)) {
+      return fetchElectronHubQuota(name, provider);
     }
     if ((provider.authMode ?? "key") === "key" && name === "cline-pass") {
       return fetchClineQuota(name, provider);

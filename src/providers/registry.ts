@@ -1082,6 +1082,80 @@ const CLINE_PASS_TEXT_ONLY_MODELS = CLINE_PASS_MODALITY_KNOWN_MODELS.filter(id =
 const CLINE_PASS_MODEL_INPUT_MODALITIES: Record<string, string[]> = Object.fromEntries(
   CLINE_PASS_MODALITY_KNOWN_MODELS.map(id => [id, CLINE_PASS_IMAGE_MODELS.has(id) ? ["text", "image"] : ["text"]]),
 );
+// Primary source checked 2026-09-02: docs.electronhub.ai/billing/coding-plan.
+// DevPass (`ek-dev-`) keys only accept the `:dev` roster below; series weight affects soft
+// full-speed headroom, not hard access. Context windows are taken from that table.
+const ELECTRONHUB_CODING_PLAN_MODELS = [
+  "glm-5.3-flash:dev",
+  "deepseek-v4-flash:dev",
+  "deepseek-v4-flash-0731:dev",
+  "mimo-v2.5:dev",
+  "qwen3.6-27b:dev",
+  "qwen3.8-27b:dev",
+  "minimax-m2.7:dev",
+  "kimi-k2.6:dev",
+  "kimi-k2.7-code:dev",
+  "glm-5.3:dev",
+];
+const ELECTRONHUB_CODING_PLAN_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
+  "glm-5.3-flash:dev": 1_048_576,
+  "deepseek-v4-flash:dev": 1_048_576,
+  "deepseek-v4-flash-0731:dev": 400_000,
+  "mimo-v2.5:dev": 1_048_576,
+  "qwen3.6-27b:dev": 262_144,
+  "qwen3.8-27b:dev": 262_144,
+  "minimax-m2.7:dev": 180_000,
+  "kimi-k2.6:dev": 240_000,
+  "kimi-k2.7-code:dev": 262_144,
+  "glm-5.3:dev": 262_144,
+};
+const ELECTRONHUB_CODING_PLAN_IMAGE_MODELS = new Set([
+  "glm-5.3-flash:dev",
+  "mimo-v2.5:dev",
+  "qwen3.6-27b:dev",
+  "qwen3.8-27b:dev",
+]);
+const ELECTRONHUB_CODING_PLAN_TEXT_ONLY_MODELS = ELECTRONHUB_CODING_PLAN_MODELS.filter(
+  id => !ELECTRONHUB_CODING_PLAN_IMAGE_MODELS.has(id),
+);
+const ELECTRONHUB_CODING_PLAN_MODEL_INPUT_MODALITIES: Record<string, string[]> = Object.fromEntries(
+  ELECTRONHUB_CODING_PLAN_MODELS.map(id => [
+    id,
+    ELECTRONHUB_CODING_PLAN_IMAGE_MODELS.has(id) ? ["text", "image"] : ["text"],
+  ]),
+);
+/** Plain five-rung ladder for aggregator-hosted families (no vendor thinking knob asserted). */
+const ELECTRONHUB_PLAIN_REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+/**
+ * Thinking ladders mirror each base model's home treatment in this registry, keyed by the
+ * BARE id: modelRecordValue's colon-family fallback resolves `glm-5.3:dev` -> `glm-5.3`,
+ * so every :dev variant inherits the de-suffixed ladder without a second hand-copied table
+ * (same mechanism the zai rows use for `[1m]` ids). Without these entries the catalog would
+ * advertise the default five-rung ladder to every :dev model — including GLM-5.3, whose
+ * upstream folds every effort into low/high/max.
+ *
+ * - glm-5.3 / glm-5.3-flash: the Z.AI three-effective-tier ladder, default max (zai rows).
+ * - deepseek-v4-flash(-0731): the DeepSeek V4 flash ladder + wire map (deepseek rows).
+ * - kimi-k2.6 / kimi-k2.7-code: no effort control, matching the Kimi Code home plan.
+ * - minimax-m2.7 / mimo-v2.5 / qwen3.6-27b / qwen3.8-27b: plain ladder, same as the
+ *   umans/cline-pass aggregator rows; ElectronHub forwards reasoning_effort to the host.
+ */
+const ELECTRONHUB_CODING_PLAN_REASONING_EFFORTS: Record<string, string[]> = {
+  "glm-5.3": ZAI_GLM_53_REASONING_EFFORTS,
+  "glm-5.3-flash": ZAI_GLM_53_REASONING_EFFORTS,
+  "deepseek-v4-flash": DEEPSEEK_FLASH_THINKING_EFFORTS,
+  "deepseek-v4-flash-0731": DEEPSEEK_FLASH_THINKING_EFFORTS,
+  "kimi-k2.6": [],
+  "kimi-k2.7-code": [],
+  "minimax-m2.7": ELECTRONHUB_PLAIN_REASONING_EFFORTS,
+  "mimo-v2.5": ELECTRONHUB_PLAIN_REASONING_EFFORTS,
+  "qwen3.6-27b": ELECTRONHUB_PLAIN_REASONING_EFFORTS,
+  "qwen3.8-27b": ELECTRONHUB_PLAIN_REASONING_EFFORTS,
+};
+const ELECTRONHUB_CODING_PLAN_REASONING_EFFORT_MAPS: Record<string, Record<string, string>> = {
+  "deepseek-v4-flash": DEEPSEEK_FLASH_REASONING_MAP,
+  "deepseek-v4-flash-0731": DEEPSEEK_FLASH_REASONING_MAP,
+};
 
 export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
   {
@@ -1617,6 +1691,38 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     // Deliberately no OpenRouter route pin: it bills the endpoint actually used and reports the
     // actual service_tier. B0 confirmation therefore owns downgrade safety. Forcing `only` plus
     // `allow_fallbacks:false` would turn a graceful priority-capacity fallback into a hard failure.
+  },
+  {
+    // Primary sources checked 2026-09-02:
+    // - docs.electronhub.ai/billing/coding-plan (DevPass roster, ek-dev- key, soft headroom).
+    // - docs.electronhub.ai/api-reference/usage (GET /v1/user/me).
+    // - docs.electronhub.ai/getting-started/authentication (ek-dev- vs ek- master key).
+    // Maintenance owner: community contribution; verify against Electron Hub docs on change.
+    id: "electronhub-coding-plan",
+    label: "Electron Hub Coding Plan",
+    adapter: "openai-chat",
+    baseUrl: "https://api.electronhub.ai/v1",
+    authKind: "key",
+    dashboardUrl: "https://app.electronhub.ai",
+    defaultModel: "glm-5.3:dev",
+    models: ELECTRONHUB_CODING_PLAN_MODELS,
+    modelContextWindows: ELECTRONHUB_CODING_PLAN_MODEL_CONTEXT_WINDOWS,
+    modelInputModalities: ELECTRONHUB_CODING_PLAN_MODEL_INPUT_MODALITIES,
+    noVisionModels: ELECTRONHUB_CODING_PLAN_TEXT_ONLY_MODELS,
+    modelReasoningEfforts: ELECTRONHUB_CODING_PLAN_REASONING_EFFORTS,
+    modelDefaultReasoningEfforts: { "glm-5.3": "max", "glm-5.3-flash": "max" },
+    modelReasoningEffortMap: ELECTRONHUB_CODING_PLAN_REASONING_EFFORT_MAPS,
+    liveModels: true,
+    // /v1/models returns the full Electron Hub catalog. DevPass keys can only call `:dev`
+    // models, so keep discovery from advertising the credit-billed roster next to them.
+    modelDiscovery: {
+      path: "models",
+      filter: {
+        allOf: [{ path: ["id"], containsAny: [":dev"] }],
+      },
+    },
+    preserveCustomDestination: true,
+    note: "Electron Hub Coding Plan (DevPass). Requires an ek-dev- key and :dev model ids only; token usage is unlimited with soft full-speed headroom and parallel-slot fair use. Do not use a master ek- key here — that bills credits against the full catalog.",
   },
   {
     // Primary sources checked 2026-08-02:

@@ -896,6 +896,112 @@ describe("fetchProviderQuotaReports", () => {
     expect(invalid.reports).toEqual([]);
   });
 
+  test("Electron Hub Coding Plan quota reports unlimited tokens for DevPass payloads", async () => {
+    const seen: Array<{ url: string; authorization?: string; redirect?: RequestRedirect }> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const headers = init?.headers as Record<string, string> | undefined;
+      seen.push({ url, authorization: headers?.Authorization, redirect: init?.redirect });
+      return new Response(JSON.stringify({
+        subscription: "coding-plan-turbo",
+        credits: null,
+        usage: { input_tokens: 10, output_tokens: 4 },
+        history: [],
+        endpoints: {},
+      }), { status: 200 });
+    }) as typeof fetch;
+
+    const result = await fetchProviderQuotaReports(
+      // The bearer literal must match privacy-scan's tests/ allowlist shape
+      // (`usage-debug-token-value-*`); the provider name alone spells a token long
+      // enough to trip the scanner.
+      keyQuotaConfig("electronhub-coding-plan", "https://api.electronhub.ai/v1", "usage-debug-token-value-electronhub-coding-plan"),
+      true,
+    );
+
+    expect(result.reports).toHaveLength(1);
+    expect(result.reports[0]?.source).toBe("electronhub:user-me");
+    expect(result.reports[0]?.quota).toMatchObject({
+      creditsUsd: {
+        used: 0,
+        limit: 0,
+        remaining: 0,
+        percent: 0,
+        unlimited: true,
+      },
+      customWindows: [{ label: "coding-plan-turbo (unlimited tokens)", percent: 0 }],
+    });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.url).toBe("https://api.electronhub.ai/v1/user/me");
+    expect(seen[0]?.authorization).toBe("Bearer usage-debug-token-value-electronhub-coding-plan");
+    expect(seen[0]?.redirect).toBe("error");
+  });
+
+  test("Electron Hub Coding Plan quota maps optional soft-headroom windows when present", async () => {
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      subscription: "devpass",
+      headroom: {
+        daily: { percent_used: 41.5, reset_at: "2026-09-03T21:00:00Z" },
+        weekly: { percentUsed: 12, resetsAt: "2026-09-09T21:00:00Z" },
+      },
+      usage: { input_tokens: 1, output_tokens: 1 },
+      history: [],
+      endpoints: {},
+    }), { status: 200 })) as typeof fetch;
+
+    const result = await fetchProviderQuotaReports(
+      keyQuotaConfig("electronhub-coding-plan", "https://api.electronhub.ai/v1"),
+      true,
+    );
+
+    expect(result.reports).toHaveLength(1);
+    expect(result.reports[0]?.quota).toMatchObject({
+      fiveHourPercent: 41.5,
+      fiveHourResetAt: Date.parse("2026-09-03T21:00:00Z"),
+      weeklyPercent: 12,
+      weeklyResetAt: Date.parse("2026-09-09T21:00:00Z"),
+      creditsUsd: { unlimited: true },
+    });
+  });
+
+  test("Electron Hub Coding Plan quota never sends the key to a non-canonical base URL", async () => {
+    const seen: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      seen.push(String(input));
+      return new Response("unexpected", { status: 500 });
+    }) as typeof fetch;
+
+    const result = await fetchProviderQuotaReports(
+      keyQuotaConfig("electronhub-coding-plan", "https://attacker.example/v1"),
+      true,
+    );
+
+    expect(result.reports).toEqual([]);
+    expect(seen).toEqual([]);
+  });
+
+  test("Electron Hub Coding Plan quota treats a terminal 401 as invalid (drops last-good)", async () => {
+    let rejected = false;
+    globalThis.fetch = (async () => {
+      if (rejected) return new Response("unauthorized", { status: 401 });
+      return new Response(JSON.stringify({
+        subscription: "coding-plan-lite",
+        credits: null,
+        usage: { input_tokens: 0, output_tokens: 0 },
+        history: [],
+        endpoints: {},
+      }), { status: 200 });
+    }) as typeof fetch;
+    const config = keyQuotaConfig("electronhub-coding-plan", "https://api.electronhub.ai/v1");
+
+    const valid = await fetchProviderQuotaReports(config, true);
+    rejected = true;
+    const invalid = await fetchProviderQuotaReports(config, true);
+
+    expect(valid.reports).toHaveLength(1);
+    expect(invalid.reports).toEqual([]);
+  });
+
   test("ClinePass quota maps five-hour/weekly/monthly utilization windows", async () => {
     const seen: Array<{ url: string; authorization?: string; redirect?: RequestRedirect }> = [];
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {

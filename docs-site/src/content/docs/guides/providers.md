@@ -303,9 +303,20 @@ selectors, then retry. Signing in from a machine with no existing `kiro-cli` ses
 
 ## 3. API-key catalog
 
-opencodex ships 79 built-in presets: 67 key-based, eight OAuth, three local, and one default
+opencodex ships 84 built-in presets: 71 key-based, nine OAuth, three local, and one default
 ChatGPT-forward preset. The dashboard's **Add provider** picker opens a key provider's dashboard,
 validates the key, and stores it; validation is provider-specific. Notable entries:
+
+**Electron Hub Coding Plan** (`electronhub-coding-plan`) uses an `ek-dev-` DevPass key against
+`https://api.electronhub.ai/v1` and the official `:dev` coding roster (for example `glm-5.3:dev`).
+Token usage is unlimited; fair use is parallel slots plus soft full-speed headroom. Thinking
+ladders mirror each base model's home treatment and are keyed by the bare id, so `:dev` variants
+inherit them (GLM-5.3 folds to low/high/max, DeepSeek V4 flash to low/high/max, Kimi k2.x exposes
+no effort control). Do not paste a
+master `ek-` key into this preset — that key bills credits against Electron Hub's full catalog.
+Quota probing reads `GET /v1/user/me` on the canonical host only; when the payload looks like Coding
+Plan it reports an unlimited-token window, and maps optional soft-headroom fields only when they
+are present.
 
 **ClinePass** uses a Cline API key with the [official subscription catalog](https://docs.cline.bot/getting-started/clinepass)
 and [Chat Completions endpoint](https://docs.cline.bot/api/chat-completions), operated by Cline Bot Inc. under
@@ -326,6 +337,7 @@ free-experimentation model.
 | **OpenAI (API key)** | `https://api.openai.com/v1` |
 | **Anthropic (API key)** | `https://api.anthropic.com` |
 | **OpenRouter** | `https://openrouter.ai/api/v1` |
+| **Electron Hub Coding Plan** | `https://api.electronhub.ai/v1` |
 | **Cline** | `https://api.cline.bot/api/v1` |
 | **ClinePass** | `https://api.cline.bot/api/v1` |
 | **Ollama Cloud** | `https://ollama.com/v1` |
@@ -643,7 +655,7 @@ The bars show how much of a window (5-hour, weekly, monthly, or
 provider-specific) is already consumed.
 
 Providers with a live probe: OpenAI/Codex, Anthropic, xAI, Cursor, Kimi,
-Google Antigravity, OpenCode Go, OpenRouter, DeepSeek, ClinePass, Z.AI, MiniMax,
+Google Antigravity, OpenCode Go, OpenRouter, Electron Hub Coding Plan, DeepSeek, ClinePass, Z.AI, MiniMax,
 Moonshot, Venice, Synthetic, DeepInfra, Neuralwatt, Command Code, and any a6api-backed
 custom provider.
 
