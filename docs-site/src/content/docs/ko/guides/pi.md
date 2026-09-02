@@ -69,6 +69,30 @@ ocx export --client pi --json > ~/opencodex-pi-models.json   # or redirect the b
 내보낸 블록은 실시간 뷰가 아니라 고정 스냅샷입니다. provider를 추가하거나 모델
 가시성을 바꾼 뒤에는 `ocx export`를 다시 실행하고, 새 블록을 옛 블록 위에 병합하세요.
 
+## 또는 opencodex에게 블록 관리를 맡기기
+
+수동 병합이 유일한 방법은 아닙니다. opencodex는 이 파일의 `providers.opencodex` 블록을
+소유할 수 있습니다. 블록을 대신 기록해 주며 — 추론 레벨도 `reasoning: true`와 각 모델의 실제
+사다리에 Pi의 레벨 선택을 제한하는 `thinkingLevelMap`으로 포함됩니다 — 파일의 다른
+provider는 건드리지 않습니다.
+
+```bash
+ocx integration client enable --client pi                          # 블록을 가져와 기록
+ocx integration client enable --client pi --overwrite-conflict     # 밀린 블록을 강제 교체
+ocx integration client status --client pi                          # current / stale / not installed
+ocx integration client history --client pi                         # op id가 달린 기록 목록
+ocx integration client restore --op <opId>                         # 기록 하나 되돌리기
+ocx integration client disable --client pi                         # 소유 해제 (블록은 유지)
+```
+
+기존 블록이 손으로 편집되어 opencodex가 쓰려는 내용과 어긋난 경우 `enable`은 거절합니다.
+`--overwrite-conflict`가 그것을 현재 카탈로그 내용으로 교체하는 탈출구입니다. 참고로 관리
+받는 Pi 블록은 `ocx sync`로 자동 새로 고쳐지지 않습니다(오늘날 자동 갱신은 MiniMax Code
+뿐입니다). 모델·사다리·가시성을 바꾼 뒤에는 `enable --overwrite-conflict`를 다시 실행하거나
+대시보드 Integrations 페이지의 Refresh / Replace를 사용해 블록을 최신화하세요. `status`가
+`stale`을 보고하면 그 신호입니다. 전체 의미론, 스냅샷, 롤백 규칙은
+[통합 가이드](/guides/integrations/)를 참고하세요.
+
 ## 인증 키
 
 여기서는 서로 헷갈리기 쉬운 키가 두 개 있고, 이 파일에 등장하는 것은 첫 번째뿐입니다.
@@ -110,7 +134,8 @@ export OPENCODEX_API_KEY=<your key>
 모든 provider를 다시 등록하는 pi-setup-custom-providers 등)은 기본값 없이 행을 pi의
 확장 경로에 통과시킵니다. 그 상태에서 첫 번째 스트림이 성공하면 사용량 비용 계산에서
 `Cannot read properties of undefined (reading 'tiers')`로 깨집니다. 로컬 프록시에게 0은
-실제로도 올바른 값입니다. 과금을 계산하는 쪽은 pi가 아니라 프록시이기 때문입니다.
+실제로도 올바른 값입니다. 과금을 계산하는 쪽은 pi가 아니라 프록시이기 때문입니다. 내보낸
+블록을 수동으로 병합한다면 `cost` 필드를 삭제하지 말고 그대로 두십시오.
 
 `reasoning`도 역사가 있는 필드입니다. 예전에는 빠져 있었습니다. Pi는 boolean을 저장하지만
 카탈로그는 effort 단계 체계를 들고 있으므로, 둘을 1:1로 맞추는 것은 추측이었기 때문입니다.

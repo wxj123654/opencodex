@@ -59,6 +59,30 @@ ocx export --client pi --json > ~/opencodex-pi-models.json   # or redirect the b
 
 エクスポートされたブロックは静的なスナップショットであり、ライブ ビューではありません。プロバイダーを追加するかモデルの可視性を変更した後、`ocx export` を再実行し、新しいブロックを古いブロックにマージします。
 
+## あるいは opencodex にブロックの管理を任せる
+
+手動マージが唯一の方法ではありません。opencodex はこのファイル内の `providers.opencodex`
+ブロックを所有できます。ブロックを自動で書き込み — 思考レベルも `reasoning: true` と、各モデルの
+実際のラダーに Pi のレベル選択を制約する `thinkingLevelMap` として含まれます — ファイル内の他の
+プロバイダーには触れません。
+
+```bash
+ocx integration client enable --client pi                          # ブロックを引き取り書き込む
+ocx integration client enable --client pi --overwrite-conflict     # 古いブロックを強制置換
+ocx integration client status --client pi                          # current / stale / not installed
+ocx integration client history --client pi                         # 書き込み履歴（op id 付き）
+ocx integration client restore --op <opId>                         # 書き込みを取り消す
+ocx integration client disable --client pi                         # 所有を解除（ブロックは残る）
+```
+
+既存のブロックが手動で編集され、opencodex が書く内容と一致しない場合、`enable` は拒否します。
+`--overwrite-conflict` はそれを現在のカタログの内容で置き換める逃げ道です。なお、管理下の Pi
+ブロックは `ocx sync` では自動更新されません（今日時点で自動更新されるのは MiniMax Code
+だけです）。モデル・ラダー・可視性を変更した後は、`enable --overwrite-conflict` を再実行するか、
+ダッシュボードの Integrations ページの Refresh / Replace を使ってブロックを最新化してください。
+`status` が `stale` を返したらその合図です。完全なセマンティクス、スナップショット、ロールバックの
+規則は[インテグレーションガイド](/guides/integrations/)を参照してください。
+
 ## アドミッションキー
 
 ここでは 2 つの異なるキーが混同されやすいため、このファイルには最初のキーのみが表示されます。
@@ -84,7 +108,7 @@ export OPENCODEX_API_KEY=<your key>
 
 `maxTokens` は、`32000` のスキーマを満たすバジェットであり、コンテキスト ウィンドウに固定されているため、小さなコンテキスト モデルにはコンテキストを超える出力が与えられません。これは、特定のモデルの真の最大値について主張するものではありません。
 
-すべての行には、明示的なゼロの `cost` が含まれます。opencodex にはルーティング モデルの価格データがありませんが、フィールドを省略することはゼロを出力するよりも悪い結果をもたらします。pi は models.json 自体から読み込んだモデルにのみ既定の `cost` を適用します。一方、providers を再登録する拡張機能（ファイル内のすべての provider を再登録する pi-setup-custom-providers など）は、既定値のない行を pi の拡張パスに通します。その状態で最初のストリームが成功すると、使用量コストの計算で `Cannot read properties of undefined (reading 'tiers')` でクラッシュします。ローカル プロキシにとってゼロは、実際にも正確な数値です。計上するのは pi ではなくプロキシ側だからです。
+すべての行には、明示的なゼロの `cost` が含まれます。opencodex にはルーティング モデルの価格データがありませんが、フィールドを省略することはゼロを出力するよりも悪い結果をもたらします。pi は models.json 自体から読み込んだモデルにのみ既定の `cost` を適用します。一方、providers を再登録する拡張機能（ファイル内のすべての provider を再登録する pi-setup-custom-providers など）は、既定値のない行を pi の拡張パスに通します。その状態で最初のストリームが成功すると、使用量コストの計算で `Cannot read properties of undefined (reading 'tiers')` でクラッシュします。ローカル プロキシにとってゼロは、実際にも正確な数値です。計上するのは pi ではなくプロキシ側だからです。手動でエクスポート ブロックをマージする場合は、`cost` フィールドを削除せずに残してください。
 
 `reasoning` も経緯のあるフィールドです。以前は省略されていました。Pi はブール値を保存しますが、カタログにはエフォート ラダーが記載されており、一方をもう一方にマッピングするのは推測になるためです。
 

@@ -952,6 +952,14 @@ function buildOpencodeClientConfig(ctx: ExportContext): OpencodeGeneratedConfig 
   };
 }
 
+/** Per-million-token rates. The export always writes explicit zeros — see {@link PiModelEntry.cost}. */
+export interface PiModelCost {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
+
 export interface PiModelEntry {
   id: string;
   name: string;
@@ -967,6 +975,15 @@ export interface PiModelEntry {
   cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
   contextWindow?: number;
   maxTokens?: number;
+  /**
+   * Explicit zero rates, written on every row. pi's models.json loader does not apply the
+   * documented all-zero default, and its usage calculator dereferences `model.cost.tiers`
+   * on every assistant message — a custom row without `cost` throws
+   * "Cannot read properties of undefined (reading 'tiers')" mid-session. The /api/models
+   * boundary carries no pricing data, so zero is also the honest value: routed models bill
+   * through the proxy's own accounting, not the client's estimate.
+   */
+  cost: PiModelCost;
   /** Advertised when the catalog row carries a non-empty effort ladder. */
   reasoning?: true;
   /**
@@ -1255,6 +1272,8 @@ function buildPiClientConfig(ctx: ExportContext): PiGeneratedConfig {
       id: model.namespaced,
       name: exportModelLabel(model),
       input,
+      // Always present: pi dereferences `model.cost.tiers` unguarded when it prices a
+      // response, so an omitted field is a mid-session crash, not a missing estimate.
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     };
     if (Array.isArray(model.reasoningEfforts) && model.reasoningEfforts.length > 0) {
@@ -1306,6 +1325,7 @@ function buildOmpClientConfig(ctx: ExportContext): OmpGeneratedConfig {
       id: model.namespaced,
       name: exportModelLabel(model),
       input,
+      // Same unguarded `model.cost.tiers` dereference as pi — omp's models.yml is Pi-like.
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       ...(model.native && model.provider === "openai" ? { api: "openai-responses" } : {}),
     };

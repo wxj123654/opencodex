@@ -79,6 +79,31 @@ The exported block is a static snapshot, not a live view. Re-run `ocx export`
 after adding a
 provider or changing model visibility, and merge the new block over the old one.
 
+## Ya da bloğu opencodex'e yönettirin
+
+Manuel birleştirme tek yol değil. opencodex bu dosyadaki `providers.opencodex` bloğunun
+sahipliğini üstlenebilir: bloğu sizin için yazar — akıl yürütme kademeleri de `reasoning: true`
+ve her modelin gerçek merdivenine Pi'nin seviye seçimini kilitleyen `thinkingLevelMap` olarak
+dahildir — ve dosyadaki diğer sağlayıcılara dokunmaz.
+
+```bash
+ocx integration client enable --client pi                          # bloğu sahiplen ve yaz
+ocx integration client enable --client pi --overwrite-conflict     # sapmış bloğu zorla değiştir
+ocx integration client status --client pi                          # current / stale / not installed
+ocx integration client history --client pi                         # op id'li yazım geçmişi
+ocx integration client restore --op <opId>                         # bir yazımı geri al
+ocx integration client disable --client pi                         # sahipliği bırak (blok kalır)
+```
+
+Mevcut blok elle düzenlendiyse ve opencodex'in yazacağıyla eşleşmiyorsa `enable` reddeder.
+`--overwrite-conflict`, bloğu mevcut katalog içeriğiyle değiştiren çıkış kapısıdır. Not:
+yönetilen Pi bloğu `ocx sync` ile otomatik yenilenmez (bugün bunu yalnızca MiniMax Code
+yapıyor). Model, merdiven veya görünürlük değişikliğinden sonra `enable --overwrite-conflict`
+komutunu yeniden çalıştırın — ya da panodaki Integrations sayfasının Refresh / Replace
+eylemini kullanın. `status`un `stale` bildirmesi harekete geçme işaretidir. Tüm anlam,
+anlık görüntü ve geri alma kuralları için [entegrasyon rehberine](/guides/integrations/)
+bakın.
+
 ## The admission key
 
 Two different keys are easy to confuse here, and only the first one appears in
@@ -124,10 +149,13 @@ small-context model is never given more output than context. It is not a claim
 about any specific
 model's true maximum.
 
-Two fields are deliberately absent. `cost` requires all four price fields and
-opencodex has no
-price data for routed models — emitting zeros would assert that every model is
-free. `reasoning` is
+`cost` is written as explicit zeros on every row. Two reasons, one per side: pi's models.json
+loader does not apply the documented all-zero default, and its usage calculator reads
+`model.cost.tiers` on every assistant message — a row without `cost` crashes the session with
+`Cannot read properties of undefined (reading 'tiers')`. And since opencodex has no price data
+for routed models, zeros are also the honest value: the client-side estimate stays $0 while the
+proxy does the real accounting. If you merge exported blocks by hand, keep the `cost` field —
+do not delete it. `reasoning` is
 a boolean in Pi while the catalog carries an effort ladder, and mapping one onto
 the other would be
 a guess.

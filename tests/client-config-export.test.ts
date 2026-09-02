@@ -388,6 +388,13 @@ describe("OMP serializer", () => {
     expect(built.text).toContain("apiKey: opencodex-loopback");
   });
 
+  test("every model row carries explicit zero cost — omp is Pi-like and dereferences cost.tiers", () => {
+    const document = buildClientConfig("omp", ctx()) as PiGeneratedConfig;
+    for (const model of document.providers.opencodex!.models) {
+      expect(model.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+    }
+  });
+
   test("keeps the provider on completions while opting native OpenAI models into Responses", () => {
     const models = [
       {

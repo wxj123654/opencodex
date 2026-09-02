@@ -77,6 +77,31 @@ ocx export --client pi --json > ~/opencodex-pi-models.json   # or redirect the b
 The exported block is a static snapshot, not a live view. Re-run `ocx export` after adding a
 provider or changing model visibility, and merge the new block over the old one.
 
+## Or let opencodex manage the block
+
+Manual merging is not the only path. opencodex can own the `providers.opencodex` block in that
+file: it writes the block for you — reasoning tiers included, as `reasoning: true` plus a
+`thinkingLevelMap` that constrains Pi's level picker to each model's real ladder — and leaves
+every other provider in the file untouched.
+
+```bash
+ocx integration client enable --client pi                          # adopt and write the block
+ocx integration client enable --client pi --overwrite-conflict     # force-replace a drifted block
+ocx integration client status --client pi                          # current / stale / not installed
+ocx integration client history --client pi                         # every write, with op ids
+ocx integration client restore --op <opId>                         # roll a write back
+ocx integration client disable --client pi                         # release ownership (block stays)
+```
+
+`enable` refuses when the existing block was edited by hand and no longer matches what opencodex
+would write; `--overwrite-conflict` is the escape hatch that replaces it with the current
+catalog's content anyway. Note that an owned Pi block is not auto-refreshed by `ocx sync` (only
+MiniMax Code is today): after a model, ladder, or visibility change, re-run
+`enable --overwrite-conflict` — or use the Refresh / Replace action on the dashboard's
+Integrations page — to bring the block current. `status` reporting `stale` is the hint to do so.
+See the [integrations guide](/guides/integrations/) for the full semantics, snapshots, and
+rollback rules.
+
 ## The admission key
 
 Two different keys are easy to confuse here, and only the first one appears in this file:
@@ -117,7 +142,8 @@ loads from models.json itself, while extensions that re-register providers — n
 pi-setup-custom-providers, which re-registers every provider in the file — pass the rows through
 pi's extension path with no default. The first successful stream then crashes calculating usage
 cost with `Cannot read properties of undefined (reading 'tiers')`. For a local proxy, zero is
-also the truthful number: the proxy meters upstream, not pi.
+also the truthful number: the proxy meters upstream, not pi. If you merge exported blocks by
+hand, keep the `cost` field — do not delete it.
 
 `reasoning` is the other field with a history: it used to be absent because Pi stores a boolean
 while the catalog carries an effort ladder, and mapping one onto the other used to be a guess. Since the

@@ -59,6 +59,26 @@ ocx export --client pi --json > ~/opencodex-pi-models.json   # 或重導逐字�
 
 匯出的區塊是靜態快照，非即時檢視。在新增供應商或改變模型可見性後，重新執行 `ocx export`，並將新區塊合併到舊區塊上。
 
+## 或者讓 opencodex 接管這個區塊
+
+手動合併並非唯一的路徑。opencodex 可以接管該檔案中的 `providers.opencodex` 區塊：由它替你寫入——思考等級也包含在內，以 `reasoning: true` 加上一個把 Pi 的檔位選擇限制在每個模型真實階梯上的 `thinkingLevelMap` 呈現——並且不碰檔案裡的其他供應商。
+
+```bash
+ocx integration client enable --client pi                          # 接管並寫入該區塊
+ocx integration client enable --client pi --overwrite-conflict     # 強制替換已漂移的區塊
+ocx integration client status --client pi                          # current / stale / not installed
+ocx integration client history --client pi                         # 每次寫入記錄（含 op id）
+ocx integration client restore --op <opId>                         # 回滾某次寫入
+ocx integration client disable --client pi                         # 解除接管（區塊保留）
+```
+
+如果現有區塊被手動編輯過、與 opencodex 要寫入的內容不一致，`enable` 會拒絕；
+`--overwrite-conflict` 就是強制用目前 catalog 內容替換它的出口。注意：受管的 Pi 區塊**不會**被
+`ocx sync` 自動重新整理（目前只有 MiniMax Code 會自動重新整理）。模型、思考階梯或可見性變更後，
+請重新執行 `enable --overwrite-conflict`——或使用儀表板 Integrations 頁面的 Refresh /
+Replace 操作——把區塊更新到最新。`status` 回報 `stale` 就是需要這麼做的訊號。完整的語義、
+快照與回滾規則見[整合指南](/guides/integrations/)。
+
 ## 認證金鑰
 
 這裡有兩種不同的 key 容易混淆，且只有第一個出現在此檔案中：
@@ -85,7 +105,7 @@ export OPENCODEX_API_KEY=<your key>
 
 `maxTokens` 是滿足 schema 的 `32000` 預算，並限制在不超過上下文窗口，使得小上下文模型永遠不會被給予超過上下文的輸出量。它並非對任何特定模型真實最大值的聲明。
 
-有兩個欄位刻意省略。`cost` 需要全部四個價格欄位，而 opencodex 對路由模型沒有價格資料 — 發出零值會斷言每個模型都是免費的。`reasoning` 在 Pi 中是 boolean，而目錄帶有 effort 階梯，將兩者互相映射會是猜測。
+`cost` 在每一列都會寫成顯式的零。兩個原因，各佔一邊：pi 的 models.json 載入器並不會套用文件所述的全零預設值，而它的用量計算器在每條 assistant 訊息上都會讀取 `model.cost.tiers` —— 缺少 `cost` 的列會讓工作階段直接當掉，報 `Cannot read properties of undefined (reading 'tiers')`。同時，opencodex 對路由模型沒有價格資料，所以零也是誠實的值：用戶端的估算維持 $0，真正的記帳由代理完成。如果你是手動合併匯出區塊，請保留 `cost` 欄位 —— 不要刪除它。`reasoning` 在 Pi 中是 boolean，而目錄帶有 effort 階梯，將兩者互相映射會是猜測。
 
 ## Schema 狀態
 

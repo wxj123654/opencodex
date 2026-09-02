@@ -69,6 +69,32 @@ ocx export --client pi --json > ~/opencodex-pi-models.json   # or redirect the b
 Le bloc exporté est un instantané statique et non une vue en direct. Réexécutez `ocx export` après avoir ajouté un
 fournisseur ou modification de la visibilité du modèle, et fusionnez le nouveau bloc sur l'ancien.
 
+## Ou laisser opencodex gérer le bloc
+
+La fusion manuelle n'est pas la seule voie. opencodex peut devenir propriétaire du bloc
+`providers.opencodex` de ce fichier : il écrit le bloc pour vous — niveaux de raisonnement
+compris, sous forme de `reasoning: true` et d'un `thinkingLevelMap` qui contraint le sélecteur
+de niveaux de Pi à l'échelle réelle de chaque modèle — et laisse tous les autres fournisseurs
+du fichier intacts.
+
+```bash
+ocx integration client enable --client pi                          # adopte et écrit le bloc
+ocx integration client enable --client pi --overwrite-conflict     # remplace un bloc dérivé
+ocx integration client status --client pi                          # current / stale / not installed
+ocx integration client history --client pi                         # chaque écriture, avec op id
+ocx integration client restore --op <opId>                         # annule une écriture
+ocx integration client disable --client pi                         # libère la propriété (bloc conservé)
+```
+
+`enable` refuse si le bloc existant a été édité à la main et ne correspond plus à ce qu'opencodex
+écrirait ; `--overwrite-conflict` est l'échappatoire qui le remplace par le contenu du catalogue
+courant. Notez qu'un bloc Pi géré n'est pas rafraîchi automatiquement par `ocx sync` (seul
+MiniMax Code l'est aujourd'hui) : après un changement de modèle, d'échelle ou de visibilité,
+relancez `enable --overwrite-conflict` — ou utilisez l'action Refresh / Replace de la page
+Integrations du tableau de bord — pour remettre le bloc à jour. Un `status` qui rapporte
+`stale` est le signal d'agir. Voir le [guide des intégrations](/guides/integrations/) pour les
+sémantiques complètes, les instantanés et les règles de retour arrière.
+
 ## La clé d'admission
 
 Deux clés différentes sont ici faciles à confondre, et seule la première apparaît dans ce fichier :
@@ -109,7 +135,8 @@ qu’aux modèles qu’il charge lui-même depuis models.json, tandis que les ex
 fournisseurs — notamment pi-setup-custom-providers, qui réenregistre chaque fournisseur du fichier —
 font passer les lignes par le chemin d’extension de pi, sans valeur par défaut. Le premier flux réussi
 fait alors planter le calcul du coût d’usage avec `Cannot read properties of undefined (reading 'tiers')`.
-Pour un proxy local, zéro est aussi la valeur exacte : la facturation a lieu en amont, pas dans pi.
+Pour un proxy local, zéro est aussi la valeur exacte : la facturation a lieu en amont, pas dans pi. Si vous
+fusionnez les blocs exportés à la main, conservez le champ `cost` — ne le supprimez pas.
 
 `reasoning` a lui aussi une histoire : il était autrefois absent parce que Pi stocke un booléen tandis que le catalogue possède une
 échelle d’effort ; cette correspondance était auparavant trop incertaine. Puisque l’échelle du catalogue
