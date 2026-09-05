@@ -1144,6 +1144,14 @@ test("chat-native preserves caller Chat fields on the upstream wire", async () =
     { role: "developer", name: "developer-sentinel", content: "developer sentinel" },
     { role: "user", name: "user-sentinel", content: "user sentinel" },
   ];
+  // The passthrough normalizes the OpenAI-exclusive `developer` role to `system` on
+  // non-OpenAI chat targets (strict backends such as Zhipu GLM reject it with HTTP 400);
+  // every other caller field rides through untouched.
+  const expectedMessages = [
+    messages[0]!,
+    { ...messages[1]!, role: "system" },
+    messages[2]!,
+  ];
   try {
     const response = await fetch(new URL("/v1/chat/completions", server.url), {
       method: "POST",
@@ -1171,7 +1179,7 @@ test("chat-native preserves caller Chat fields on the upstream wire", async () =
     expect(captured).toHaveLength(1);
     expect(captured[0]).toMatchObject({
       model: "test-model",
-      messages,
+      messages: expectedMessages,
       stream: true,
       stream_options: { include_usage: true, sentinel_option: "preserved" },
       max_completion_tokens: 321,
@@ -1185,7 +1193,7 @@ test("chat-native preserves caller Chat fields on the upstream wire", async () =
       metadata: { trace: "metadata-sentinel" },
       parallel_tool_calls: false,
     });
-    expect(captured[0]!.messages).toEqual(messages);
+    expect(captured[0]!.messages).toEqual(expectedMessages);
     expect(captured[0]).not.toHaveProperty("max_tokens");
     expect(captured[0]).not.toHaveProperty("instructions");
     expect(captured[0]).not.toHaveProperty("input");
