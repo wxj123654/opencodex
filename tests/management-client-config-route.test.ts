@@ -18,12 +18,15 @@ import {
   opencodeGlobalConfigPath,
   type DshGeneratedConfig,
   type ExportModel,
+  type HermesGeneratedConfig,
+  type McodeGeneratedConfig,
   type OpencodeGeneratedConfig,
   type PiGeneratedConfig,
   type ZcodeGeneratedConfig,
 } from "../src/clients/config-export";
 import type { OcxConfig } from "../src/types";
 import { catalogConvergenceFactory } from "./helpers/catalog-convergence";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 /**
  * A key that looks exactly like a real one. Every assertion about `ocx_` absence is
@@ -49,7 +52,7 @@ afterAll(() => {
   else process.env.OPENCODEX_HOME = originalOpenCodexHome;
   if (originalCodexHome === undefined) delete process.env.CODEX_HOME;
   else process.env.CODEX_HOME = originalCodexHome;
-  rmSync(entitlementTestRoot, { recursive: true, force: true });
+  removeTreeWithRetry(entitlementTestRoot);
 });
 
 afterEach(() => {
@@ -77,6 +80,7 @@ interface ModelRow {
   disabled: boolean;
   native?: boolean;
   displayName?: string;
+  displayNameSource?: "operator" | "provider" | "fallback";
   contextWindow?: number;
   inputModalities?: string[];
   reasoningEfforts?: string[];
@@ -102,7 +106,8 @@ function baseConfig(overrides: Partial<OcxConfig> = {}): OcxConfig {
         liveModels: false,
         models: ["m1", "m2"],
         modelContextWindows: { m1: 128_000 },
-        modelReasoningEfforts: { m1: ["low", "high"] },
+        modelInputModalities: { m1: ["text", "image"], m2: ["text"] },
+        modelReasoningEfforts: { m1: ["none", "minimal", "low", "high"] },
         modelDefaultReasoningEfforts: { m1: "high" },
       },
       b: {
@@ -146,7 +151,7 @@ function toExportModel(row: ModelRow): ExportModel {
     provider: row.provider,
     id: row.id,
     ...(row.native ? { native: true } : {}),
-    ...(row.displayName ? { displayName: row.displayName } : {}),
+    ...(row.displayName && row.displayNameSource !== "fallback" ? { displayName: row.displayName } : {}),
     ...(row.contextWindow !== undefined ? { contextWindow: row.contextWindow } : {}),
     ...(row.inputModalities ? { inputModalities: row.inputModalities } : {}),
     ...(row.reasoningEfforts ? { reasoningEfforts: row.reasoningEfforts } : {}),
@@ -274,10 +279,24 @@ describe("GET /api/client-config", () => {
     const apiKeyModel = provider.models["a/m1"]!;
     expect(apiKeyModel.reasoning).toEqual({
       enabled: true,
-      levels: ["low", "high"],
+      levels: ["minimal", "low", "high"],
       defaultLevel: "high",
     });
     expect(JSON.stringify(body.config)).not.toContain(REAL_LOOKING_KEY);
+  }, 15_000);
+
+  test("Hermes response projects catalog vision metadata through YAML", async () => {
+    const response = await clientConfigApi(baseConfig(), "?client=hermes");
+    expect(response.status).toBe(200);
+    const body = await response.json() as ClientConfigEnvelope;
+    const models = (body.config as HermesGeneratedConfig).providers[OPENCODE_PROVIDER_ID]!.models;
+
+    expect(Bun.YAML.parse(body.text)).toEqual(body.config as Record<string, unknown>);
+    expect(models["a/m1"]).toEqual({ supports_vision: true });
+    // Effective catalog hints may widen ordinary text rows to image-capable.
+    expect(models["a/m2"]).toEqual({ supports_vision: true });
+    expect(models["b/no-context"]).toEqual({});
+    expect(body.modelCount).toBe(Object.keys(models).length);
   }, 15_000);
 
   test("an expired management roster is refreshed once before client-config is projected", async () => {
@@ -340,12 +359,12 @@ describe("GET /api/client-config", () => {
 
     expect(body.format).toBe("yaml");
     expect(Bun.YAML.parse(body.text)).toEqual(body.config as Record<string, unknown>);
-    // The shared fixture's m1 ladder is ["low", "high"] (the ZCode test above
-    // pins the default), so the MCode mapping drops "none" and emits what is
-    // declared rather than the upstream fixture's ["minimal", "low", "high"].
+    // The shared fixture's m1 ladder is ["none", "minimal", "low", "high"]
+    // (the ZCode test above pins the default), so the MCode mapping drops
+    // "none" and emits ["minimal", "low", "high"].
     expect(provider.models["a/m1"]).toEqual({
       limit: { context: 128_000 },
-      thinking: { effortOptions: ["low", "high"] },
+      thinking: { effortOptions: ["minimal", "low", "high"] },
     });
     expect(provider.models["b/no-context"]).toEqual({});
     expect(body.modelsWithoutLimits).toBe(2);
