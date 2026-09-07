@@ -16,9 +16,9 @@ import {
   type OcxErrorPayload,
 } from "./lib/errors";
 import { redactSecretString } from "./lib/redact";
-import { repairFreeformToolInput } from "./responses/apply-patch-envelope";
+import { mayBecomePatchEnvelope, repairFreeformToolInput } from "./responses/apply-patch-envelope";
 import { encodeCompactionSummary } from "./responses/compaction";
-import { compileCodeModeHelperInput } from "./responses/code-mode-helper-compat";
+import { compileCodeModeHelperInput, resolveCodeModeHelperName } from "./responses/code-mode-helper-compat";
 import { isTruncatedStopReason, truncationReasonFor } from "./responses/truncated-stop-reason";
 import { encodeReasoningEnvelope, type ReasoningEnvelope } from "./responses/reasoning-envelope";
 import { rememberReasoningForCall } from "./responses/reasoning-replay-cache";
@@ -33,7 +33,7 @@ import {
   stripCitationMarkers,
   type CitationMarkerFilter,
 } from "./responses/citation-markers";
-import { normalizeDeclaredToolName } from "./types";
+import { declaresCodeModeExec, normalizeDeclaredToolName } from "./types";
 import { usageDisplayTotalTokens } from "./usage/totals";
 import { appendSafeWebSearchSource, safeWebSearchSources } from "./web-search/sources";
 import {
@@ -277,9 +277,12 @@ export function bridgeToResponsesSSE(
     toolName: string,
     namespace?: string,
     codeModeHelperName?: string,
-  ): string => codeModeHelperName
-    ? compileCodeModeHelperInput(args, codeModeHelperName)
-    : repairFreeformToolInput(args, toolName, namespace);
+  ): string => {
+    const helper = resolveCodeModeHelperName(codeModeHelperName, toolName, args, namespace, options?.declaredToolNames);
+    return helper
+      ? compileCodeModeHelperInput(args, helper)
+      : repairFreeformToolInput(args, toolName, namespace);
+  };
   // Best-effort unwrap of a PARTIAL freeform arg buffer for live input streaming
   // (`response.custom_tool_call_input.delta` — codex-rs uses it for UI preview only;
   // the completed custom_tool_call item stays authoritative). Compact `{"input":"...`
@@ -942,6 +945,13 @@ export function bridgeToResponsesSSE(
             }
             if (event.type !== "done" && event.type !== "incomplete" && event.type !== "error") continue;
           }
+          // Anthropic signature_delta supplies the latest signature, not an append-only
+          // fragment (anthropic-sdk-typescript MessageStream). Keep consecutive updates
+          // together; the next semantic event belongs to the following block.
+          if (pendingSignature !== undefined && event.type !== "thinking_signature" && event.type !== "heartbeat") {
+            if (currentReasoning) closeCurrentReasoning();
+            else flushHiddenReasoningEnvelope();
+          }
           switch (event.type) {
             case "assistant_boundary": {
               // A guarded continuation starts a fresh assistant output item while keeping the
@@ -1051,15 +1061,21 @@ export function bridgeToResponsesSSE(
             case "thinking_signature": {
               pendingSignatureBytes = replaceRetainedString(pendingSignatureBytes, event.signature, "reasoning");
               pendingSignature = event.signature;
-              // Signature arrives at the end of the thinking block. With a visible reasoning item
-              // open, closeCurrentReasoning attaches the envelope; hidden/suppressed blocks flush
-              // an envelope-only reasoning item now.
-              if (!currentReasoning) flushHiddenReasoningEnvelope();
+              // Delay closing until the next semantic event so a signature update cannot
+              // create another block or become attached to the following thinking text.
               break;
             }
             case "redacted_thinking": {
+              if (currentMsg) closeCurrentMessage("commentary");
+              if (currentReasoning) closeCurrentReasoning();
+              if (currentRawReasoning) closeCurrentRawReasoning();
+              flushHiddenRawReasoning();
+              if (currentToolCall) closeCurrentToolCall();
               budget?.chargeRetained(bytesOf(event.data), { kind: "reasoning" });
               pendingRedacted.push(event.data);
+              // A redacted block is complete at content_block_start. Emit it here,
+              // not with a later thinking block or after a tool call at turn end.
+              flushHiddenReasoningEnvelope();
               break;
             }
             case "kiro_redacted_reasoning": {
@@ -1172,7 +1188,13 @@ export function bridgeToResponsesSSE(
                   if (!FREEFORM_WRAP_PREFIX.startsWith(currentToolCall.args)) {
                     const full = freeformPartialInput(currentToolCall.args);
                     const emitted = currentToolCall.inputEmitted ?? "";
-                    if (full.startsWith(emitted) && full.length > emitted.length) {
+                    // Also hold a buffer that could still become a complete patch envelope:
+                    // at completion such a body is recompiled into an apply_patch helper call,
+                    // and streaming the envelope bytes first would be that same rewind.
+                    const mayCompile = declaresCodeModeExec(options?.declaredToolNames)
+                      && !currentToolCall.namespace
+                      && currentToolCall.name === "exec";
+                    if (!(mayCompile && mayBecomePatchEnvelope(full)) && full.startsWith(emitted) && full.length > emitted.length) {
                       emit("response.custom_tool_call_input.delta", {
                         item_id: currentToolCall.itemId, output_index: currentToolCall.outputIndex,
                         delta: full.slice(emitted.length),
@@ -1666,9 +1688,12 @@ function buildResponseJSONWithBudget(
     toolName: string,
     namespace?: string,
     codeModeHelperName?: string,
-  ): string => codeModeHelperName
-    ? compileCodeModeHelperInput(args, codeModeHelperName)
-    : repairFreeformToolInput(args, toolName, namespace);
+  ): string => {
+    const helper = resolveCodeModeHelperName(codeModeHelperName, toolName, args, namespace, options?.declaredToolNames);
+    return helper
+      ? compileCodeModeHelperInput(args, helper)
+      : repairFreeformToolInput(args, toolName, namespace);
+  };
   const parseArgsObj = (args: string): Record<string, unknown> => {
     try { const o = JSON.parse(args); return o && typeof o === "object" ? o : {}; } catch { return {}; }
   };
@@ -1804,6 +1829,9 @@ function buildResponseJSONWithBudget(
       if (budget) releaseTranslatedEvent(e, budget);
       continue;
     }
+    if (batchSignature !== undefined && e.type !== "thinking_signature" && e.type !== "heartbeat") {
+      flushSummaryReasoning();
+    }
     switch (e.type) {
       case "assistant_boundary":
         flushText("commentary");
@@ -1848,19 +1876,23 @@ function buildResponseJSONWithBudget(
         }
         break;
       case "thinking_signature":
-        // End of the current thinking block — flush it WITH the signature envelope so the
-        // block/signature pairing survives multi-block turns.
+        // Like streaming, retain the latest signature update until the next semantic
+        // event. Flushing every update would manufacture signature-only siblings.
         batchSignatureBytes = replaceBatchRetainedString(batchSignatureBytes, e.signature, "reasoning");
         batchSignature = e.signature;
-        flushSummaryReasoning();
         break;
       case "redacted_thinking":
+        flushText("commentary");
+        flushSummaryReasoning();
+        flushRawReasoning();
+        flushToolCall();
         {
           const dataBytes = bytesOf(e.data);
           budget?.chargeRetained(dataBytes, { kind: "reasoning" });
           batchRedactedBytes += dataBytes;
         }
         batchRedacted.push(e.data);
+        flushSummaryReasoning();
         break;
       case "kiro_redacted_reasoning":
         // Stash only — pushed after the trailing flushes. One blob per turn, so last wins.
