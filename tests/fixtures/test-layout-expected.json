@@ -1139,5 +1139,6 @@
   "model-costs-management-api.test.ts": "server",
   "usage-time-range.test.ts": "usage",
   "model-pinned-effort.test.ts": "codex-integration",
-  "model-pinned-effort-config.test.ts": "config"
+  "model-pinned-effort-config.test.ts": "config",
+  "zai-zcode-headers.test.ts": "providers"
 }

@@ -429,6 +429,34 @@ const ZAI_GLM_5X_REASONING_EFFORTS: Record<string, string[]> = {
   ...Object.fromEntries(ZAI_GLM_53_MODELS.map(id => [id, ZAI_GLM_53_REASONING_EFFORTS])),
   ...Object.fromEntries(ZAI_GLM_52_MODELS.map(id => [id, ZAI_GLM_52_REASONING_EFFORTS])),
 };
+/**
+ * The ZCode desktop client identity headers, replicated at the fingerprinting layer.
+ *
+ * Z.AI / BigModel serve the same GLM Coding Plan to `api.z.ai` and `open.bigmodel.cn`
+ * respectively, and both hosts distinguish the official ZCode desktop client from generic or
+ * bare callers by the companion identity headers a real ZCode install sends. A third-party
+ * caller that omits them is fingerprinted as a non-ZCode client, which vendors have used to
+ * apply different rate/limit treatment. Sending the official client's identity makes the
+ * proxy's requests indistinguishable from ZCode's at that layer.
+ *
+ * The shape below mirrors ZCode 3.11.2's LLM-path builder (`buildCliZCodeSourceHeaders`,
+ * wrapped by `x4i` which appends `X-ZCode-Agent: "glm"` last). Every value is a constant
+ * identifying the client; none carries a per-request secret. `X-ZCode-Agent: glm` is the
+ * marker that selects the GLM engine path, and `X-Release-Channel` resolves to "production"
+ * for a normal install. @see docs-site reference on the GLM coding-plan routes.
+ */
+const ZAI_ZCODE_IDENTITY_HEADERS: Record<string, string> = {
+  "User-Agent": "ZCode/3.11.2",
+  "X-ZCode-App-Version": "3.11.2",
+  "X-Title": "Z Code@electron",
+  "HTTP-Referer": "https://zcode.z.ai/",
+  "X-Release-Channel": "production",
+  "X-Client-Language": "zh-CN",
+  "X-Client-Timezone": "Asia/Shanghai",
+  "X-Platform": "win32-x64",
+  "X-Os-Category": "windows",
+  "X-ZCode-Agent": "glm",
+};
 // 260710 MiniMax models and context windows: Tier-2 evidence in
 // devlog/_plan/260710_provider_hardening/002_research_cn.md.
 const MINIMAX_MODELS = [
@@ -2633,6 +2661,10 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     modelMaxOutputTokens: Object.fromEntries(ZAI_GLM_53_MODELS.map(id => [id, 131_072])),
     modelSupportsReasoningSummaries: Object.fromEntries(ZAI_GLM_5X_MODELS.map(id => [id, true])),
     preserveReasoningContentModels: ZAI_GLM_5X_MODELS,
+    // Present the official ZCode desktop client identity so this coding-plan subscription is
+    // not fingerprinted as a bare/third-party caller (see ZAI_ZCODE_IDENTITY_HEADERS). User
+    // headers still win case-insensitively at route time.
+    staticHeaders: ZAI_ZCODE_IDENTITY_HEADERS,
   },
   // Zhipu's domestic BigModel platform: OpenAI-compatible pay-as-you-go on open.bigmodel.cn — a
   // different host and billing product from the `zai` coding-plan subscription above.
@@ -2716,6 +2748,9 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     modelReasoningEfforts: ZAI_GLM_5X_REASONING_EFFORTS,
     modelSupportsReasoningSummaries: Object.fromEntries(ZAI_GLM_5X_MODELS.map(id => [id, true])),
     preserveReasoningContentModels: ZAI_GLM_5X_MODELS,
+    // Same ZCode client identity as the `zai` row: this domestic coding-plan endpoint is served
+    // by the same vendor family, and the official ZCode client carries this fingerprint there too.
+    staticHeaders: ZAI_ZCODE_IDENTITY_HEADERS,
     // No liveModels: the same reasoning as the pay-as-you-go row — an unverified live claim
     // yields an empty picker at runtime.
     note: "Domestic BigModel Coding Plan endpoint (open.bigmodel.cn)",
