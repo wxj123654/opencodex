@@ -27,7 +27,7 @@ export line, and how many models carry authoritative context limits.
       "baseUrl": "http://127.0.0.1:10100/v1",
       "api": "openai-completions",
       "apiKey": "$OPENCODEX_API_KEY",
-      "compat": { "supportsDeveloperRole": false },
+      "compat": { "supportsDeveloperRole": false, "sendSessionAffinityHeaders": true },
       "models": [
         {
           "id": "anthropic/claude-opus-5",
@@ -49,6 +49,11 @@ that role is uneven behind the proxy — z.ai's glm-5.3-flash answers it with
 `400 Incorrect role information` while glm-5.3 accepts it. Pinning the portable `system`
 role costs nothing on the endpoints that do accept `developer` and unbreaks the ones that
 don't.
+
+Generated Pi providers also enable `compat.sendSessionAffinityHeaders`. Keep this flag when
+merging or manually editing the provider: Pi supplies a stable session identity and OpenCodex
+derives canonical OpenCode Go affinity from it. Pi may omit the identity when `cacheRetention`
+is `none`.
 
 Model ids are the proxy's canonical selectors, so routed models appear as `provider/model`
 (`anthropic/claude-opus-5`) and native OpenAI slugs stay unprefixed (`gpt-5.6-sol`). The `name`

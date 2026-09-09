@@ -704,7 +704,7 @@ export interface PiProviderBlock {
    * `compat.supportsDeveloperRole`, so we pin the portable `system` role for every
    * routed model instead of guessing per upstream.
    */
-  compat: { supportsDeveloperRole: false };
+  compat: { supportsDeveloperRole: false; sendSessionAffinityHeaders?: boolean };
   models: PiModelEntry[];
 }
 
@@ -831,7 +831,7 @@ export interface GajaeGeneratedConfig {
  * `system` role via `compat.supportsDeveloperRole: false` — is still ours rather
  * than a claim about Pi's acceptance.
  */
-function buildPiClientConfig(ctx: ExportContext): PiGeneratedConfig {
+function buildPiClientConfig(ctx: ExportContext, sendSessionAffinityHeaders = false): PiGeneratedConfig {
   const models: PiModelEntry[] = [];
   for (const model of normalizeExportModels(ctx.models)) {
     // Text is the one modality every routed model supports; anything richer must come
@@ -877,7 +877,7 @@ function buildPiClientConfig(ctx: ExportContext): PiGeneratedConfig {
         baseUrl: ctx.baseUrl,
         api: PI_API_DIALECT,
         apiKey: LOOPBACK_API_KEY_PLACEHOLDER,
-        compat: { supportsDeveloperRole: false },
+        compat: { supportsDeveloperRole: false, ...(sendSessionAffinityHeaders ? { sendSessionAffinityHeaders: true } : {}) },
         models,
       },
     },
@@ -1050,7 +1050,7 @@ function buildOpencodeContribution(ctx: ExportContext): ManagedContribution {
 }
 
 function buildPiContribution(ctx: ExportContext): ManagedContribution {
-  const doc = buildPiClientConfig(ctx);
+  const doc = buildPiClientConfig(ctx, true);
   return singleFragment("pi", ["providers", OPENCODE_PROVIDER_ID], doc.providers[OPENCODE_PROVIDER_ID]);
 }
 
@@ -1146,7 +1146,7 @@ export const EXPORT_CLIENTS: Record<ExportClientId, ExportClientSpec> = {
     destination: env => piConfigPath(env),
     apiKeyEnv: "",
     exportHint: "Pi reads a non-secret placeholder from models.json; loopback needs no key.",
-    build: buildPiClientConfig,
+    build: ctx => buildPiClientConfig(ctx, true),
     format: "json",
     summarize: summarizePi,
     buildContribution: buildPiContribution,

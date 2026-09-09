@@ -116,6 +116,10 @@ published long-context bands on `openai` and `openai-apikey`. The two Daybreak B
 follow the Sol API reference. These are comparison estimates, not invoices or credit-balance
 predictions. Explicit provider/model price overrides still take precedence.
 
+## Provider namespace aliases
+
+Providers can expose a built-in shorthand, such as `agy` for `google-antigravity`. A configured provider name or explicit alias claims that shorthand case-insensitively; a different provider's built-in shorthand is then suppressed in both catalog names and alias routing. For example, configuring a provider named `agy` keeps Google's models under `google-antigravity/<model>`, while `agy/<model>` selects the configured provider. Canonical provider names still require an exact case match, and unrecognized prefixes retain the existing model-routing fallback.
+
 ## Provider entries (`OcxProviderConfig`)
 
 | Field | Type | Meaning |
@@ -149,7 +153,7 @@ predictions. Explicit provider/model price overrides still take precedence.
 | `modelAutoCompactTokenLimits?` | `Record<string, number>` | Positive safe-integer per-model soft auto-compaction budgets. Values can only lower the effective 90%-of-context/max-input envelope and are omitted when no authoritative context window is known. For canonical `openai`, keys must be exact supported native model IDs without provider or account-selector prefixes. Provider PATCH merges entries; set a key to `null` to delete it or the whole field to `null` to clear the map. These `null` tombstones are PATCH-only. |
 | `defaultMaxOutputTokens?` | `number` | Provider-wide `openai-chat` fallback when the client omits `max_output_tokens`. |
 | `modelMaxOutputTokens?` | `Record<string, number>` | Positive per-model `openai-chat` fallback budgets; exact/pattern matches beat the provider default. |
-| `modelCosts?` | `Record<string, Cost4>` | Per-model display prices (USD per 1M tokens), keyed by that provider's exact upstream model id — not a provider identifier or a routed `provider/model` label, e.g. `{ "deepseek-v4-flash": { "input": 0.14, "output": 0.28, "cacheRead": 0.0028, "cacheWrite": 0 } }`. Any model id is a valid key — custom providers may target any OpenAI-compatible endpoint through the `openai-chat` adapter, and local or internal provider ids work even when they are absent from the built-in catalogs. User-configured prices win over the built-in catalogs in the Logs `~$` and Usage estimates; historical entries are repriced from the current overlay, so editing a price can move past totals. The fallback order is user `modelCosts` → exact official correction → jawcode catalog → expected-price overlay → model-level vendor fallback, and an all-zero entry falls through to the next source in that sequence. Each rate must be a non-negative finite number at most 1,000,000 (USD per 1M tokens); out-of-range rows are rejected by the management boundary and dropped on load. Display-time estimation only: overlays never affect routing, account selection, quotas, or billing. |
+| `modelCosts?` | `Record<string, Cost4>` | Per-model display prices (USD per 1M tokens), keyed by that provider's exact upstream model id — not a provider identifier or a routed `provider/model` label, e.g. `{ "deepseek-v4-flash": { "input": 0.14, "output": 0.28, "cacheRead": 0.0028, "cacheWrite": 0 } }`. Any model id is a valid key — custom providers may target any OpenAI-compatible endpoint through the `openai-chat` adapter, and local or internal provider ids work even when they are absent from the built-in catalogs. User-configured prices win over the built-in catalogs in the Logs `~$` and Usage estimates; historical entries are repriced from the current overlay, so editing a price can move past totals. The fallback order is user `modelCosts` → exact official correction → jawcode catalog → expected-price overlay → model-level vendor fallback, and an explicit all-zero user entry means a known-zero estimate; delete that model entry to restore automatic pricing. All-zero catalog metadata still falls through. Each rate must be a non-negative finite number at most 1,000,000 (USD per 1M tokens); out-of-range rows are rejected by the management boundary and dropped on load. Display-time estimation only: overlays never affect routing, account selection, quotas, or billing. |
 | `headers?` | `Record<string, string>` | Extra upstream headers. Authorization, cookies, API-key headers, embedded newlines, and invalid names are rejected. |
 | `openRouterRouting?` | `OpenRouterProviderRouting` | Default OpenRouter `order`, `only`, and `allowFallbacks` preferences; valid only for canonical OpenRouter with `openai-chat`. |
 | `modelOpenRouterRouting?` | `Record<string, OpenRouterProviderRouting>` | Exact model-id overrides that replace the provider-wide OpenRouter preference. |
@@ -162,7 +166,7 @@ predictions. Explicit provider/model price overrides still take precedence.
 | `modelReasoningEfforts?` | `Record<string, string[]>` | Per-model labels. An empty list hides effort control. As with `reasoningEfforts`, each configured `google`-adapter ladder asserts `thinkingLevel` capability; direct and Vertex non-image requests use the flat Gemini path, while Cloud Code Assist sends it under its request envelope. |
 | `modelSupportsReasoningSummaries?` | `Record<string, boolean>` | Set a model to `false` to stop advertising summaries and strip summary-delivery fields. |
 | `modelReasoningSummaryDelivery?` | `Record<string, "sequential" \| "sequential_cutoff" \| "concurrent" \| "concurrent_cutoff">` | Per-model Responses delivery enum; rewrites an existing delivery field. |
-| `modelAdapters?` | `Record<string, string>` | Per-model `openai-chat` or `openai-responses` wire override for mixed-wire gateways. Explicit entries beat registry defaults. The OpenCode Go preset selects Responses for `gpt-5.6-luna` while leaving sibling models on their documented wires; DeepSeek can select native Responses for `deepseek-v4-flash`; and GitHub Copilot declares Responses-only defaults for its GPT-5 family (`gpt-5.3-codex`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.5`, `gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`) because those models reject `/chat/completions` for agent traffic. Models without a built-in default (for example `gpt-5.4-nano`) can be opted in here. Single-wire upstream pins and canonical ChatGPT forward reject overrides. |
+| `modelAdapters?` | `Record<string, string>` | Per-model `openai-chat` or `openai-responses` wire override for mixed-wire gateways. Explicit entries beat registry defaults. The OpenCode Go preset selects Responses for `gpt-5.6-luna` while leaving sibling models on their documented wires; DeepSeek can select native Responses for `deepseek-v4-flash`; and GitHub Copilot declares Responses-only defaults for the following models (`gpt-5.3-codex`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.5`, `gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-6-astra`, `grok-4.5`, `grok-4.6`, `mai-code-1.1-flash`, `mai-code-1-flash-picker`) because those models reject `/chat/completions` for agent traffic. Models without a built-in default (for example `gpt-5.4-nano`) can be opted in here. Single-wire upstream pins and canonical ChatGPT forward reject overrides. |
 | xAI Chat Completions (dashboard / CLI) | switch | Grok 4.5/4.6 OAuth Responses requests default to Responses. Existing Chat overrides are migrated once on upgrade; later Chat choices are preserved. Turn on to select Chat for both models, off to select Responses. CLI: `ocx provider edit xai --xai-chat on` or `--xai-chat off` (running proxy required). Mixed means only one model currently uses Chat. Other overrides and tier policy stay unchanged. API-key and translated Chat/Anthropic defaults are unchanged. |
 | `xaiResponsesXSearch?` | `boolean` | Disabled by default. On an xAI Responses destination, append the provider-hosted `x_search` declaration only when a live `web_search` tool survives final request normalization. Existing declarations are not duplicated, caller `tool_choice`/`allowed_tools` selectors are never widened, and this is separate from the web-search sidecar's `search.xSearch` options. |
 | `modelPreferHostedTools?` | `Record<string,string[]>` | Exact-model opt-in for non-forward Responses gateways that reserve a hosted-tool namespace. Currently accepts only `["image_generation"]`; a matching model must use the `openai-responses` wire and support that hosted tool. It removes colliding client `image_gen` declarations and rewrites their selectors to preserve caller tool choice. For OpenAI API virtual `-pro` models, the selected public ID is matched first and the resolved base wire-model ID is a fallback. `modelAdapters` resolves the public ID first, then the base ID; the second resolution determines the final wire. Other models retain normal alias behavior. |
@@ -208,6 +212,35 @@ An explicit empty list remains empty with no default; a nonempty incompatible li
 to the native default as a single choice. Defaults must belong to the final list. This changes
 the catalog projection, not stored configuration or arbitrary gateway models sharing a GPT name.
 See [custom native catalog examples](/guides/codex-app-models/).
+
+### Operator-pinned reasoning effort
+
+Set `pinnedReasoningEffort` on an existing provider to override incoming effort choices, or
+use `modelPinnedReasoningEfforts` for individual upstream model IDs. Per-model provider pins
+win over the provider-wide pin; the root `modelPinnedEfforts` map is the fallback. These are
+operator settings, not provider-registry defaults. They do not change model discovery or the
+advertised effort ladder.
+
+```json
+{
+  "pinnedReasoningEffort": "high",
+  "modelPinnedReasoningEfforts": {
+    "example-model": "max"
+  }
+}
+```
+
+Merge these fields into the existing provider row. Accepted values are `none`, `minimal`,
+`low`, `medium`, `high`, `xhigh`, `max`, and `ultra`. **`none` removes the explicit effort field**;
+it uses the provider's default behavior and does not guarantee that reasoning is disabled.
+Applicable effort caps still run after the pin, and provider wire mapping/normalization can
+lower or omit an unsupported value. `ultra` is normalized before it reaches an upstream wire.
+Compaction maintenance requests are exempt from pins.
+
+`PATCH /api/providers?name=<provider>` accepts these fields. Omit a field to preserve it;
+use `null` to clear a scalar or the whole map. A map entry set to `null` or `""` removes that
+entry while preserving other entries. Malformed writes are rejected before saving. A malformed
+optional pin in a hand-edited file is ignored on load without discarding the rest of the config.
 
 ### Discovered model display names
 
@@ -379,6 +412,19 @@ the dashboard keeps the standard-price estimate as a documented lower bound and 
 API-key providers may hold a literal key or an environment reference. OAuth providers use the
 credential store populated by `ocx login`; subscription-backed Claude Code launch behavior is
 configured under [`claudeCode.authMode`](/reference/configuration/server/#claude-code).
+
+OrcaRouter exposes both forms explicitly: `orcarouter` is the manual API-key provider and
+`orcarouter-oauth` runs browser consent with S256 PKCE, then stores the returned durable API key as
+an account credential. The public defaults intentionally split authentication
+(`https://www.orcarouter.ai`) from inference (`https://api.orcarouter.ai/v1`). Set
+`ORCAROUTER_BASE_URL` before the first account login for a one-origin self-hosted deployment, or use
+`ORCAROUTER_AUTH_BASE_URL` and `ORCAROUTER_API_BASE_URL` for separate origins.
+For a loopback/private self-hosted endpoint, **before the first login**, create or update
+`providers["orcarouter-oauth"]` with `adapter: "openai-chat"`, the intended `baseUrl`,
+`authMode: "oauth"`, and an explicit `allowPrivateNetwork: true`. Login preserves that operator
+setting and never grants it from a URL override. Without it, destination validation rejects the
+local endpoint for inference and model discovery. The OAuth browser callback listener itself
+does not require this provider opt-in. See the [OrcaRouter setup example](/guides/providers/).
 
 ## Provider diagnostic outbound safety
 
@@ -875,6 +921,32 @@ ids with context `922000` and max input `922000`; OpenRouter seeds `openai/gpt-5
 }
 ```
 
+## OpenCode Go Responses compatibility
+
+On non-forward requests whose resolved endpoint is `https://opencode.ai/zen/go/v1/responses`, OpenCodex moves
+Codex's `additional_tools` input declarations into top-level `tools` after tool and namespace
+normalization. Supported hosted tools are preserved until model-specific filtering; malformed
+wrappers remain unchanged. This does not discard ciphertext or unknown agent-message content.
+The check uses the final URL, so endpoint-inclusive base URLs and split `baseUrl`/`responsesPath`
+configurations receive the same behavior. A custom path resolving elsewhere does not.
+
+The canonical `opencode-go` preset defaults to `statelessResponses: true`: requests use explicit
+history with `store: false`, without `previous_response_id`, `conversation`, `background`,
+`metadata`, or stored `prompt` references. This avoids Go's rejection of reasoning ciphertext
+combined with `previous_response_id`. The continuation cache records reasoning in the same
+representation returned to the client, including the visible content-to-summary rewrite, so
+echoing full history with `previous_response_id` does not duplicate that history. Hidden-summary
+requests and opaque reasoning blobs retain their existing representation. Cache hits can also
+supply earlier history for delta continuations;
+after a cache miss, resend the complete conversation without `previous_response_id`. Stateless
+repair labels orphan results and missing tool results; it cannot reconstruct lost history or
+prove whether a missing tool execution succeeded.
+
+An explicit `statelessResponses: false` is preserved. Existing canonical preset configurations
+receive the default only when the setting is absent; custom renamed entries keep their configured
+value and do not acquire this default by destination matching. Chat model routes keep their
+existing protocol. The stateless flag does not force Responses streaming into JSON.
+
 ## OpenCode Go reasoning efforts
 
 Go catalog rows preserve their configured reasoning efforts exactly, including during
@@ -894,14 +966,21 @@ their previous behavior. See the
 [ordering migration note](/guides/model-ordering/#migration-note-native-ids-in-existing-orders).
 `modelDisplayNames` on a provider controls readable labels without changing wire ids.
 
-## OpenCode Go session and agent messages
+## Routed agent messages
 
-With the [`openai-responses` adapter](/reference/adapters/#openai-responses) and
-base URL `https://opencode.ai/zen/go/v1`, plaintext Codex `agent_message` items
-become user messages when `authMode` is not `"forward"` (for example, `"key"`).
-Providers using `authMode: "forward"` retain these items unchanged. This conversion is scoped to that destination, including
-renamed provider entries; other Responses destinations keep their input unchanged.
+With the [`openai-responses` adapter](/reference/adapters/#openai-responses), Codex
+`agent_message` items containing nonempty arrays of supported plaintext parts become user messages when `authMode` is not `"forward"`
+(for example, `"key"`). Providers using `authMode: "forward"` retain these items unchanged.
+`agent_message` is private to the ChatGPT Codex backend, and the routed destinations
+reported so far answer the whole request with
+`422 unknown item type "agent_message"`; Codex replays sub-agent history on every
+subsequent turn, so the thread keeps failing until the item is converted.
 Author and recipient remain explicit text metadata, and the content parts are preserved.
+For HTTPS `api.x.ai` and `cli-chat-proxy.grok.com` on the standard port, non-forward
+Responses dispatch also accepts a nonblank string child result and turns it into one
+`input_text` part. The original string, including leading/trailing whitespace and newlines,
+is preserved. Other destinations keep string-valued agent messages unchanged. Empty or
+whitespace-only strings remain unchanged, as do incomplete and mixed encrypted/unknown shapes.
 Encrypted and unknown content is not normalized; native encrypted tasks still require the
 separate opt-in [task recovery](/reference/configuration/agents/#encrypted-v2-task-recovery).
 
@@ -919,6 +998,6 @@ current tail message (ignoring trailing `compaction_trigger` or `additional_tool
 It does not batch-recover unseen historical messages; those remain unchanged. A cache miss
 or expiry does not extend the history-recovery contract.
 
-Sender and recipient on Go Responses are context for the receiving model, not a new
+Sender and recipient on routed Responses are context for the receiving model, not a new
 machine-readable routing protocol. Tool routing continues to use the existing collaboration
 contracts.

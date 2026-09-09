@@ -11,6 +11,7 @@ import {
   LOOPBACK_API_KEY_PLACEHOLDER,
   SCHEMA_REQUIRED_OUTPUT_BUDGET,
   buildClientConfig,
+  buildClientContribution,
   buildClientConfigText,
   isExportClientId,
   normalizeExportModels,
@@ -318,7 +319,8 @@ describe("Pi serializer (accept criterion 2)", () => {
     // Pi sends OpenAI's `developer` role for reasoning-capable models unless the
     // provider opts out. Upstream acceptance is uneven (z.ai's glm-5.3-flash 400s
     // on it, glm-5.3 accepts it), so the export pins the portable `system` role.
-    expect(provider.compat).toEqual({ supportsDeveloperRole: false });
+    expect(provider.compat).toEqual({ supportsDeveloperRole: false, sendSessionAffinityHeaders: true });
+    expect(buildClientContribution("pi", ctx()).fragments[0]!.value).toEqual(provider);
   });
 
   test("every entry carries an explicit zero cost — pi's extension path applies no default", () => {
@@ -920,7 +922,7 @@ describe("EXPORT_CLIENTS registry", () => {
 `);
   });
 
-  test("pi bytes are unchanged, to the last newline", () => {
+  test("pi bytes include session affinity, to the last newline", () => {
     const built = buildClientConfigText("pi", ctx({ config: cfg() }));
     expect(built.format).toBe("json");
     expect(built.text).toBe(`{
@@ -930,7 +932,8 @@ describe("EXPORT_CLIENTS registry", () => {
       "api": "openai-completions",
       "apiKey": "opencodex-loopback",
       "compat": {
-        "supportsDeveloperRole": false
+        "supportsDeveloperRole": false,
+        "sendSessionAffinityHeaders": true
       },
       "models": [
         {
