@@ -661,6 +661,14 @@ negative, or internally inconsistent billing totals produce no report rather tha
 > **GLM billing routes:** `zai` is the Z.AI international coding-plan subscription; `zhipu-bigmodel`
 > is Zhipu's domestic BigModel pay-as-you-go endpoint. Different hosts, different keys, different
 > billing — a key issued for one will not authenticate against the other.
+>
+> **ZCode client identity.** Both `zai` and `zhipu-bigmodel-coding` send the official ZCode
+> desktop client's companion identity headers (`User-Agent: ZCode/3.11.2`, `X-ZCode-App-Version`,
+> `X-Title: Z Code@electron`, `X-ZCode-Agent: glm`, and friends) on every upstream request, through
+> the registry `staticHeaders` mechanism. Z.AI and BigModel fingerprint callers at this layer and
+> distinguish the official desktop app from bare or third-party callers, so presenting the client
+> marker makes the proxy's requests indistinguishable from ZCode's. User-configured headers still
+> win case-insensitively at route time, so you can override the version or identity if needed.
 
 ### BigModel Coding Plan over Responses
 
