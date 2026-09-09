@@ -5,6 +5,8 @@
  * Same translate-and-replay pattern as Claude Messages: the produced body must pass
  * responsesRequestSchema so routing/OAuth/pool/sidecars are inherited unchanged.
  */
+import { createHash } from "node:crypto";
+
 export class ChatCompletionsRequestError extends Error {}
 
 type Rec = Record<string, unknown>;
@@ -243,6 +245,16 @@ function resolveReasoningSummary(raw: Rec): string | undefined {
   return undefined;
 }
 
+/** Recursive canonical JSON (keys sorted at every depth) — stable cache-cohort input. */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Rec).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
+    return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
 /**
  * Translate an OpenAI Chat Completions request body into a /v1/responses request body.
  * Throws ChatCompletionsRequestError (-> 400) on malformed input.
@@ -321,7 +333,35 @@ export function chatCompletionsToResponsesBody(raw: unknown): Rec {
   if (typeof raw.user === "string") body.user = raw.user;
   if (typeof raw.parallel_tool_calls === "boolean") body.parallel_tool_calls = raw.parallel_tool_calls;
   if (typeof raw.service_tier === "string") body.service_tier = raw.service_tier;
-  if (typeof raw.prompt_cache_key === "string") body.prompt_cache_key = raw.prompt_cache_key;
+  if (typeof raw.prompt_cache_key === "string") {
+    body.prompt_cache_key = raw.prompt_cache_key;
+  } else if (systemParts.length > 0) {
+    // The ChatGPT Codex backend routes prompt caching by prompt_cache_key. Codex CLI sends its
+    // session id; Claude Messages translation derives one from metadata.user_id (devlog 090).
+    // Chat Completions clients (Pi, OpenAI SDKs) cannot send the field — it is not part of the
+    // public chat protocol — so without a fallback every turn lands on the backend without a
+    // key and reported cached_tokens: 0 or hit best-effort only: astra 5.9%, luna 41.4% vs
+    // 85-94% on the keyed Messages path (usage.jsonl, 2026-09-09).
+    //
+    // Fall back to the same cache-cohort hash as src/claude/inbound.ts (devlog 260712 B4 + Pro
+    // review 012): fingerprint what the upstream actually receives — resolved model, the
+    // post-translation system parts, and the FULL translated tool definitions in WIRE ORDER
+    // (sorting the hash while sending a different order would break the key↔prefix
+    // correspondence). canonical JSON (recursive key sort) + a version field so future
+    // normalization changes never mix cohorts. The Pi turn replay keeps system/tools byte
+    // stable, so the key is stable within a session and the backend can route consecutive
+    // turns to the same cache population. Exact-prefix matching still isolates content; the
+    // key only steers routing affinity. Callers must NOT synthesize a session_id header from
+    // this fallback (audit 133 R2#3).
+    body.prompt_cache_key = createHash("sha256")
+      .update(canonicalJson({
+        version: 1,
+        model: body.model,
+        system: systemParts,
+        tools: Array.isArray(body.tools) ? body.tools : [],
+      }))
+      .digest("hex").slice(0, 32);
+  }
   if (raw.metadata !== undefined) body.metadata = raw.metadata;
 
   const effort = resolveReasoningEffort(raw);

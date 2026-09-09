@@ -238,6 +238,90 @@ test("chatCompletionsToResponsesBody maps messages/tools/system", () => {
   expect(input.some(i => i.type === "function_call_output" && i.call_id === "call_1")).toBe(true);
 });
 
+describe("chatCompletionsToResponsesBody prompt_cache_key cohort", () => {
+  test("derives a stable cohort key when the caller sends none", () => {
+    const mk = () => ({
+      model: "gpt-6-astra",
+      messages: [
+        { role: "system", content: "You are Pi." },
+        { role: "user", content: "hi" },
+      ],
+      tools: [{
+        type: "function",
+        function: { name: "read", description: "read a file", parameters: { type: "object", properties: { path: { type: "string" } } } },
+      }],
+    });
+    const a = chatCompletionsToResponsesBody(mk());
+    const b = chatCompletionsToResponsesBody({ ...mk(), messages: [...mk().messages, { role: "assistant", content: "hello" }] });
+    // Same system+tools+model -> same key, so consecutive replay turns route to one cache
+    // population on the ChatGPT backend even though the conversation grows.
+    expect(typeof a.prompt_cache_key).toBe("string");
+    expect(a.prompt_cache_key).toMatch(/^[0-9a-f]{32}$/);
+    expect(b.prompt_cache_key).toBe(a.prompt_cache_key);
+  });
+
+  test("growing turn history does not change the derived key", () => {
+    // Pi-style full-transcript replay: only the message tail grows between turns.
+    const turn1 = chatCompletionsToResponsesBody({
+      model: "gpt-5.6-luna",
+      messages: [{ role: "system", content: "sys" }, { role: "user", content: "first" }],
+    });
+    const turn2 = chatCompletionsToResponsesBody({
+      model: "gpt-5.6-luna",
+      messages: [
+        { role: "system", content: "sys" },
+        { role: "user", content: "first" },
+        { role: "assistant", content: "answer" },
+        { role: "user", content: "second" },
+      ],
+    });
+    expect(turn2.prompt_cache_key).toBe(turn1.prompt_cache_key);
+  });
+
+  test("system, model, and tools each participate in the cohort fingerprint", () => {
+    const base = { model: "m", messages: [{ role: "system", content: "s" }, { role: "user", content: "u" }] };
+    const ref = chatCompletionsToResponsesBody(base);
+    const otherSystem = chatCompletionsToResponsesBody({ ...base, messages: [{ role: "system", content: "t" }, { role: "user", content: "u" }] });
+    const otherModel = chatCompletionsToResponsesBody({ ...base, model: "m2" });
+    const withTools = chatCompletionsToResponsesBody({
+      ...base,
+      tools: [{ type: "function", function: { name: "f", description: "d", parameters: { type: "object", properties: {} } } }],
+    });
+    expect(ref.prompt_cache_key).not.toBe(otherSystem.prompt_cache_key);
+    expect(ref.prompt_cache_key).not.toBe(otherModel.prompt_cache_key);
+    expect(ref.prompt_cache_key).not.toBe(withTools.prompt_cache_key);
+  });
+
+  test("a caller-supplied prompt_cache_key is forwarded verbatim and wins over derivation", () => {
+    const body = chatCompletionsToResponsesBody({
+      model: "m",
+      prompt_cache_key: "caller-key",
+      messages: [{ role: "system", content: "s" }, { role: "user", content: "u" }],
+    });
+    expect(body.prompt_cache_key).toBe("caller-key");
+  });
+
+  test("no system message and no caller key -> no derived key", () => {
+    // Mirrors the Claude inbound guard: an empty cohort is not a population, and a
+    // key herding unrelated conversations together would only burn the per-key
+    // routing budget.
+    const body = chatCompletionsToResponsesBody({ model: "m", messages: [{ role: "user", content: "u" }] });
+    expect(body.prompt_cache_key).toBeUndefined();
+  });
+
+  test("developer messages count as system for the cohort fingerprint", () => {
+    const viaSystem = chatCompletionsToResponsesBody({
+      model: "m",
+      messages: [{ role: "system", content: "s" }, { role: "user", content: "u" }],
+    });
+    const viaDeveloper = chatCompletionsToResponsesBody({
+      model: "m",
+      messages: [{ role: "developer", content: "s" }, { role: "user", content: "u" }],
+    });
+    expect(viaDeveloper.prompt_cache_key).toBe(viaSystem.prompt_cache_key);
+  });
+});
+
 describe("chatCompletionsToResponsesBody image parts", () => {
   test.each([
     { part: { type: "image_url", image_url: "https://example.com/image.png" }, expected: { type: "input_image", image_url: "https://example.com/image.png" } },
@@ -2909,6 +2993,57 @@ test("a sibling model on the same provider still takes the chat wire (#404)", as
 
     expect(captured.length).toBe(1);
     expect(captured[0]!.pathname).toContain("/chat/completions");
+  } finally {
+    await server.stop(true);
+    upstream.stop(true);
+  }
+});
+
+test("chat->responses forward reaches the upstream with a stable derived prompt_cache_key", async () => {
+  const { server: upstream, captured } = mockDualWireUpstream();
+  // Route through the openai-responses forward adapter so the internal Chat translation body
+  // is sent on the /v1/responses wire (Pi / OpenAI-SDK style client, not native Codex).
+  saveConfig({
+    port: 0,
+    defaultProvider: "mock",
+    providers: {
+      mock: {
+        adapter: "openai-responses",
+        baseUrl: `${upstream.url.toString().replace(/\/$/, "")}/v1`,
+        authMode: "key",
+        apiKey: "k",
+        allowPrivateNetwork: true,
+      },
+    },
+  } as OcxConfig);
+  const server = startServer(0);
+  const post = (messages: unknown[]) => fetch(new URL("/v1/chat/completions", server.url), {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: "Bearer k" },
+    body: JSON.stringify({ model: "mock/test-model", stream: false, messages }),
+  });
+  try {
+    // Two turns of one session with growing history and an identical system+tools cohort.
+    await post([
+      { role: "system", content: "You are Pi." },
+      { role: "user", content: "first" },
+    ]);
+    await post([
+      { role: "system", content: "You are Pi." },
+      { role: "user", content: "first" },
+      { role: "assistant", content: "answer" },
+      { role: "user", content: "second" },
+    ]);
+    expect(captured.length).toBe(2);
+    expect(captured[0]!.pathname).toContain("/responses");
+    expect(captured[1]!.pathname).toContain("/responses");
+    const k1 = (captured[0]!.body as Record<string, unknown>).prompt_cache_key;
+    const k2 = (captured[1]!.body as Record<string, unknown>).prompt_cache_key;
+    expect(typeof k1).toBe("string");
+    expect(k1).toMatch(/^[0-9a-f]{32}$/);
+    // Growing history must NOT change the cohort key, or consecutive turns would route to
+    // different cache populations and never hit.
+    expect(k2).toBe(k1);
   } finally {
     await server.stop(true);
     upstream.stop(true);
