@@ -607,6 +607,13 @@ const DEEPSEEK_VISION_PREVIEW_MODEL = "deepseek-v4-flash-vision-exp";
  */
 const COMMAND_CODE_IMAGE_MODELS = [
   `deepseek/${DEEPSEEK_VISION_PREVIEW_MODEL}`,
+  // MEASURED 2026-09-10 against /alpha/generate: a 64x64 solid-red PNG asked
+  // "What color fills this image?" returned "Red", a solid-blue PNG returned
+  // "Blue", while the v4-pro negative control answered nothing and reasoned
+  // "Without image impossible" — the exact drop-the-image behavior that keeps
+  // the rest of the deepseek family out of this list. Upstream's profile
+  // payload also declares caps vision:true, but the probe is the evidence.
+  "deepseek/deepseek-v4.1-flash",
   "gpt-5.6-luna",
   "gpt-5.6-sol",
   "MiniMaxAI/MiniMax-M3",

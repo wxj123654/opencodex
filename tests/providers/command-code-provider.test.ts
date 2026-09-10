@@ -4,7 +4,10 @@ import { loginCommandCode, parseCommandCodeCallback, shouldImportLocalCommandCod
 import { buildModelsRequest, OAUTH_PROVIDERS } from "../../src/oauth";
 import {
   commandCodeReasoningEfforts,
+  ensureCommandCodeProfileCatalog,
+  parseCommandCodeProfileEfforts,
   refreshCommandCodeReasoningEfforts,
+  removeCommandCodeEffort,
   resetCommandCodeReasoningEffortsForTest,
 } from "../../src/providers/command-code-efforts";
 import { PROVIDER_REGISTRY } from "../../src/providers/registry";
@@ -38,6 +41,34 @@ async function builtRequest(...args: Parameters<ReturnType<typeof createCommandC
 
 afterEach(() => resetCommandCodeReasoningEffortsForTest());
 
+/*
+ * Synthetic Command Code profile-page fixture. The real pages embed the whole
+ * model catalog in one flat serialized React Router flight array, delivered as
+ *
+ *   window.__reactRouterContext.streamController.enqueue("[{...}]")
+ *
+ * where integers are references to other slots and effort ladders are arrays of
+ * references to the effort words. JSON.stringify on the JSON text produces a
+ * JS literal whose escapes line up with the JSON document, exactly like the
+ * live pages.
+ */
+const FLIGHT_WORDS = ["low", "medium", "high", "xhigh", "max"];
+// Effort words always occupy the first five slots of a fixture flat array, so
+// refs are independent of the rest payload and safe to use inside its arguments.
+function flightRef(word: string): number {
+  const index = FLIGHT_WORDS.indexOf(word);
+  if (index === -1) throw new Error(`not a flight effort word: ${word}`);
+  return index;
+}
+function flightFlat(...rest: unknown[]): unknown[] {
+  return [...FLIGHT_WORDS, ...rest];
+}
+function flightPage(flat: unknown[]): string {
+  const literal = JSON.stringify(JSON.stringify(flat));
+  return `<html><script>window.__reactRouterContext.streamController.enqueue(${literal})</script>`
+    + `<script>window.__reactRouterContext.streamController.close()</script></html>`;
+}
+
 describe("Command Code provider", () => {
   test("registry and OAuth surfaces stay in parity", () => {
     const registry = PROVIDER_REGISTRY.find(row => row.id === "command-code");
@@ -55,6 +86,7 @@ describe("Command Code provider", () => {
     expect(registry?.models).toBeUndefined();
     expect(registry?.modelReasoningEfforts).toMatchObject({
       "deepseek/deepseek-v4-flash": ["high", "max"],
+      "deepseek/deepseek-v4.1-flash": ["low", "high", "max"],
       "zai-org/GLM-5.2": ["high", "max"],
     });
     expect(OAUTH_PROVIDERS["command-code"]?.providerConfig).toMatchObject({
@@ -80,6 +112,7 @@ describe("Command Code provider", () => {
     expect(apiKey?.modelReasoningEfforts).toEqual(oauth?.modelReasoningEfforts);
     expect(apiKey?.modelReasoningEfforts).toMatchObject({
       "deepseek/deepseek-v4-pro": ["high", "max"],
+      "deepseek/deepseek-v4.1-flash": ["low", "high", "max"],
       "zai-org/GLM-5": ["high", "max"],
       "zai-org/GLM-5.1": ["high", "max"],
       "zai-org/GLM-5.2-Fast": ["high", "max"],
@@ -117,6 +150,7 @@ describe("Command Code provider", () => {
     const apiKey = PROVIDER_REGISTRY.find(row => row.id === "commandcode");
     const verifiedImageModels = [
       "deepseek/deepseek-v4-flash-vision-exp",
+      "deepseek/deepseek-v4.1-flash",
       "gpt-5.6-luna",
       "gpt-5.6-sol",
       "MiniMaxAI/MiniMax-M3",
@@ -670,27 +704,190 @@ describe("Command Code provider", () => {
   });
 
   // Pins the CURRENT, BROKEN state of the profile-refresh path so nobody re-derives
-  // the false justification that a wrong ladder self-corrects.
-  //
-  // commandcode.ai serves these profiles as a React flight payload. The ladder key
-  // is present but its array is empty in the delivered bytes
-  // (`reasoningEfforts\",[]` — measured on 2026-08-27 for gpt-5.6-luna, glm-5-3 and
-  // deepseek-v4-pro alike), and there is no "Reasoning efforts ... are supported;"
-  // prose anywhere on the page. So parsedProfileEfforts finds nothing and the row
-  // is never replaced.
-  //
-  // When someone teaches the parser to read a real payload, this test SHOULD fail.
-  // That failure is the signal to delete it and update the provenance note in
-  // command-code-efforts.ts, which currently tells the reader this net does not work.
-  test("a real profile page shape yields no efforts, so the row is not self-correcting", async () => {
-    const flightPayload = 'self.__next_f.push([1,"...\\"reasoningEfforts\\",[],\\"inputCost\\",0,\\"minPlanName\\",\\"Go\\"..."])';
-    const fetch = (async () => new Response(flightPayload)) as typeof globalThis.fetch;
+  /*
+   * Signal-light successor. The test this replaces ("a real profile page shape
+   * yields no efforts, so the row is not self-correcting") pinned the broken
+   * refresh path and told the reader to delete it once the parser could read a
+   * real payload - that parser now exists (parseCommandCodeProfileEfforts), so
+   * this is the replacement proof: a page-shaped flight payload heals a NEW
+   * model that has no seed row at all.
+   *
+   * deepseek/deepseek-v4-flash-fast is still unseeded (distinct from v4-flash;
+   * the live page declares [low, high, max] for it). Using an unseeded id keeps
+   * this proof independent of the seed table growing.
+   */
+  test("the embedded flight payload heals a new model's ladder without a seed row", async () => {
+    const flat = flightFlat(
+      "deepseek-v4-flash-fast",
+      "deepseek/deepseek-v4-flash-fast",
+      "DeepSeek V4 Flash Fast",
+      "DeepSeek",
+      "fast hybrid-attention reasoning",
+      { _157: 112, _113: 18 },
+      [flightRef("low"), flightRef("high"), flightRef("max")],
+      0.003, 0.26, 0.047, [], [flightRef("max")],
+    );
+    const fetch = (async () => new Response(flightPage(flat))) as typeof globalThis.fetch;
 
-    const refreshed = await refreshCommandCodeReasoningEfforts("gpt-5.6-luna", fetch);
+    expect(commandCodeReasoningEfforts("deepseek/deepseek-v4-flash-fast")).toBeUndefined();
+    const refreshed = await refreshCommandCodeReasoningEfforts("deepseek/deepseek-v4-flash-fast", fetch);
 
-    expect(refreshed).toBeUndefined();
-    // And the table value survives untouched, which is the safe half of the failure.
-    expect(commandCodeReasoningEfforts("gpt-5.6-luna")).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    expect(refreshed).toEqual(["low", "high", "max"]);
+    expect(commandCodeReasoningEfforts("deepseek/deepseek-v4-flash-fast")).toEqual(["low", "high", "max"]);
+  });
+
+  test("parseCommandCodeProfileEfforts decodes catalog rows, bare ids, and detail records without pollution", () => {
+    const flat = flightFlat(
+      // pricing noise before the first row: a whitelisted-word array whose
+      // nearest preceding string is NOT a model id must be dropped
+      "peak", 7, "offPeakHoursPerDay", 17, [flightRef("max")],
+      // catalog row with the URL-slug twin: the nearer real id must win
+      "deepseek-v4-1-flash",
+      "deepseek/deepseek-v4.1-flash",
+      "DeepSeek V4.1 Flash",
+      "DeepSeek",
+      "V4.1 hybrid-attention reasoning with vision",
+      { _157: 112 },
+      [flightRef("low"), flightRef("high"), flightRef("max")],
+      // bare-id catalog row (the /provider/v1/models shape)
+      "openai",
+      "gpt-5.6-luna",
+      "GPT-5.6 Luna",
+      "most capable OpenAI model",
+      { _157: 112 },
+      [flightRef("low"), flightRef("medium"), flightRef("high"), flightRef("xhigh"), flightRef("max")],
+      // detail record with an EMPTY ladder: nothing to merge, no entry
+      { _97: 98 },
+      "slug", "ling-3-0-flash-free", "id", "inclusionai/ling-3.0-flash-free", "name", "Ling 3.0 Flash",
+      "vendor", "inclusionAI", "category", "opensource", "blurb", "fast MoE work",
+      "contextWindow", 256000, "reasoning", true, "vision", "caps", { _157: 112 },
+      "reasoningEfforts", [],
+      "inputCost", 0,
+      // detail record with a real ladder owned by its nearest preceding id
+      "slug", "kimi-k3", "id", "moonshotai/Kimi-K3", "name", "Kimi K3",
+      "contextWindow", 1000000, "reasoning", true, "caps", { _157: 112 },
+      "reasoningEfforts", [flightRef("low"), flightRef("high"), flightRef("max")],
+    );
+
+    const parsed = parseCommandCodeProfileEfforts(flightPage(flat));
+
+    expect(parsed).toEqual({
+      "deepseek/deepseek-v4.1-flash": ["low", "high", "max"],
+      "gpt-5.6-luna": ["low", "medium", "high", "xhigh", "max"],
+      "moonshotai/Kimi-K3": ["low", "high", "max"],
+    });
+  });
+
+  test("parseCommandCodeProfileEfforts rejects pages without a flight payload", () => {
+    expect(parseCommandCodeProfileEfforts("Reasoning efforts high are supported; no other reasoning settings.")).toBeUndefined();
+    expect(parseCommandCodeProfileEfforts("<html>nothing embedded</html>")).toBeUndefined();
+  });
+
+  test("profile merges are additive: a page that lags reality never shrinks a measured ladder", async () => {
+    // muse-spark-1.2: the table carries the 2026-08-13 measured max tier; the
+    // page payload declares only four words. The union must keep all five.
+    const flat = flightFlat(
+      "meta/muse-spark-1.2", "Muse Spark 1.2", "desc", { _157: 112 },
+      [flightRef("low"), flightRef("medium"), flightRef("high"), flightRef("xhigh")],
+    );
+    const fetch = (async () => new Response(flightPage(flat))) as typeof globalThis.fetch;
+
+    const refreshed = await refreshCommandCodeReasoningEfforts("meta/muse-spark-1.2", fetch);
+
+    expect(refreshed).toEqual(["low", "medium", "high", "xhigh", "max"]);
+  });
+
+  test("profile merges add newly declared words in canonical order", async () => {
+    const flat = flightFlat(
+      "deepseek/deepseek-v4-flash", "DeepSeek V4 Flash", "desc", { _157: 112 },
+      [flightRef("low"), flightRef("high"), flightRef("max")],
+    );
+    const fetch = (async () => new Response(flightPage(flat))) as typeof globalThis.fetch;
+
+    const refreshed = await refreshCommandCodeReasoningEfforts("deepseek/deepseek-v4-flash", fetch);
+
+    expect(refreshed).toEqual(["low", "high", "max"]);
+  });
+
+  test("removeCommandCodeEffort drops a rejected word locally and the next merge restores it", async () => {
+    expect(removeCommandCodeEffort("deepseek/deepseek-v4-flash", "ultra"))
+      .toEqual(["high", "max"]); // unknown word: ladder unchanged
+    expect(removeCommandCodeEffort("DEEPSEEK/DEEPSEEK-V4-FLASH", "max"))
+      .toEqual(["high"]); // case-insensitive hit, word removed
+    expect(removeCommandCodeEffort("zai-org/no-such-model", "max")).toBeUndefined();
+
+    // The upstream 400 was transient: a page still declaring max puts it back.
+    const flat = flightFlat(
+      "deepseek/deepseek-v4-flash", "DeepSeek V4 Flash", "desc", { _157: 112 },
+      [flightRef("low"), flightRef("high"), flightRef("max")],
+    );
+    const fetch = (async () => new Response(flightPage(flat))) as typeof globalThis.fetch;
+    expect(await refreshCommandCodeReasoningEfforts("deepseek/deepseek-v4-flash", fetch))
+      .toEqual(["low", "high", "max"]);
+  });
+
+  test("ensureCommandCodeProfileCatalog is throttled and single-flight", async () => {
+    const flat = flightFlat(
+      "deepseek/deepseek-v4-flash-fast", "DeepSeek V4 Flash Fast", "desc", "DeepSeek", { _157: 112 },
+      [flightRef("low"), flightRef("high"), flightRef("max")],
+    );
+    let fetches = 0;
+    const fetch = (async (url: string | URL | Request) => {
+      fetches += 1;
+      expect(String(url)).toBe("https://commandcode.ai/models/deepseek-v4-flash");
+      return new Response(flightPage(flat));
+    }) as typeof globalThis.fetch;
+
+    expect(commandCodeReasoningEfforts("deepseek/deepseek-v4-flash-fast")).toBeUndefined();
+    expect(await ensureCommandCodeProfileCatalog(fetch)).toBe(true);
+    expect(commandCodeReasoningEfforts("deepseek/deepseek-v4-flash-fast")).toEqual(["low", "high", "max"]);
+
+    // Inside the throttle window: no second fetch, no change reported.
+    expect(await ensureCommandCodeProfileCatalog(fetch)).toBe(false);
+    expect(fetches).toBe(1);
+
+    // Concurrent callers share one in-flight attempt.
+    resetCommandCodeReasoningEffortsForTest();
+    let releaseResponse: (value: Response) => void = () => {};
+    const gate = new Promise<Response>(resolve => { releaseResponse = resolve; });
+    let slowFetches = 0;
+    const slowFetch = (async () => {
+      slowFetches += 1;
+      return gate;
+    }) as unknown as typeof globalThis.fetch;
+    const first = ensureCommandCodeProfileCatalog(slowFetch);
+    const second = ensureCommandCodeProfileCatalog(slowFetch);
+    releaseResponse(new Response(flightPage(flightFlat(
+      "deepseek/deepseek-v4-flash-fast", "DeepSeek V4 Flash Fast", "desc", "DeepSeek", { _157: 112 },
+      [flightRef("low"), flightRef("high"), flightRef("max")],
+    ))));
+    expect(await first).toBe(true);
+    expect(await second).toBe(true);
+    expect(slowFetches).toBe(1);
+  });
+
+  test("an unknown model request warms the profile catalog in the background", async () => {
+    const flat = flightFlat(
+      "inclusionai/ling-3.0-flash-sante:free", "Ling 3.0 Flash Sante", "desc", "inclusionAI", { _157: 112 },
+      [flightRef("low"), flightRef("high")],
+    );
+    let profileFetches = 0;
+    const fetch = (async (url: string | URL | Request) => {
+      if (String(url).includes("commandcode.ai/models/")) {
+        profileFetches += 1;
+        return new Response(flightPage(flat));
+      }
+      return new Response("{}", { status: 200 });
+    }) as typeof globalThis.fetch;
+
+    expect(commandCodeReasoningEfforts("inclusionai/ling-3.0-flash-sante:free")).toBeUndefined();
+    const built = await createCommandCodeAdapter({ ...provider, fetch } as OcxProviderConfig)
+      .buildRequest({ ...parsed("inclusionai/ling-3.0-flash-sante:free"), options: { reasoning: "high", maxOutputTokens: 100 } });
+    // This request still goes out WITHOUT an effort (the ladder is not known yet).
+    expect(JSON.parse(built.body).params).not.toHaveProperty("reasoning_effort");
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(profileFetches).toBe(1);
+    expect(commandCodeReasoningEfforts("inclusionai/ling-3.0-flash-sante:free")).toEqual(["low", "high"]);
   });
 
   test("omits effort when the caller did not choose one", async () => {

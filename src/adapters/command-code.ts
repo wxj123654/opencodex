@@ -9,7 +9,12 @@ import type { TranslatorBudget } from "../lib/translator-budget";
 import { readBoundedResponseBody } from "../lib/bounded-body";
 import { debugDroppedFrame } from "../lib/debug";
 import { configuredReasoningEfforts } from "../reasoning-effort";
-import { commandCodeReasoningEfforts, refreshCommandCodeReasoningEfforts } from "../providers/command-code-efforts";
+import {
+  commandCodeReasoningEfforts,
+  ensureCommandCodeProfileCatalog,
+  refreshCommandCodeReasoningEfforts,
+  removeCommandCodeEffort,
+} from "../providers/command-code-efforts";
 import { identifyRoutedModel } from "./identity";
 import { buildNonOpenAIToolCatalogNudgeForTools } from "./tool-catalog-nudge";
 import { parseDataUrl } from "./image";
@@ -481,14 +486,22 @@ async function fetchCommandCode(request: AdapterRequest, ctx: AdapterFetchContex
   }
 }
 
-function supportedCommandCodeEffort(provider: OcxProviderConfig, modelId: string, requested: string | undefined): string | undefined {
+function supportedCommandCodeEffort(provider: OcxProviderConfig, modelId: string, requested: string | undefined, fetchFn: typeof globalThis.fetch): string | undefined {
   if (!requested || requested === "none") return undefined;
   // Compatibility ids (deepseek-v4-flash / glm-5.2) must resolve to their canonical
   // Command Code id before the effort lookup, or legacy requests silently lose the
   // reasoning effort because the official table is keyed by the canonical ids.
   const canonicalId = canonicalCommandCodeModelId(modelId);
   const supported = commandCodeReasoningEfforts(canonicalId) ?? configuredReasoningEfforts(provider, canonicalId);
-  if (!supported) return undefined;
+  if (!supported) {
+    // Unknown model: the profile payload embedded in any Command Code page
+    // carries the whole catalog's ladders. Warm it in the background (throttled
+    // and single-flight inside the module); this request still goes out without
+    // an effort, and the next catalog advertisement / request picks the ladder up.
+    // The provider's own fetch wins so a configured transport (and tests) apply.
+    void ensureCommandCodeProfileCatalog(fetchFn).catch(() => { /* best effort */ });
+    return undefined;
+  }
   // Only remap xhigh/ultra→max for models whose official profile documents that
   // aliasing (deepseek v4, glm-5.2). Muse Spark's upstream accepts xhigh as a
   // distinct wire value and rejects ultra, so it must not be collapsed.
@@ -521,7 +534,7 @@ export function createCommandCodeAdapter(provider: OcxProviderConfig): ProviderA
         ...(toolNudge ? [toolNudge] : []),
         ...(choiceInstruction ? [choiceInstruction] : []),
       ].join("\n\n"), parsed.modelId);
-      const reasoningEffort = supportedCommandCodeEffort(provider, parsed.modelId, parsed.options.reasoning);
+      const reasoningEffort = supportedCommandCodeEffort(provider, parsed.modelId, parsed.options.reasoning, executor);
       const body = {
         config: await commandCodeConfig(cwd), memory: "", taste: null, skills: null,
         permissionMode: "standard", mode: "agent",
@@ -575,7 +588,12 @@ export function createCommandCodeAdapter(provider: OcxProviderConfig): ProviderA
       })();
       if (typeof modelId !== "string") return response;
       const refreshed = await refreshCommandCodeReasoningEfforts(modelId, executor);
-      if (!refreshed || refreshed.includes(currentEffort)) return response;
+      // The upstream explicitly rejected this word, so drop it locally even
+      // though the page merge is union-only; the next page merge restores it if
+      // the page still declares it. undefined means the model has no recorded
+      // ladder at all, in which case the refresh result decides.
+      const remaining = removeCommandCodeEffort(modelId, currentEffort);
+      if (remaining === undefined && (refreshed === undefined || refreshed.includes(currentEffort))) return response;
       const retry = requestWithoutReasoningEffort(request);
       if (!retry) return response;
       try { void response.body?.cancel(); } catch { /* already closed */ }
