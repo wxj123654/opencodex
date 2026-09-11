@@ -373,16 +373,19 @@ describe("GET /api/client-config", () => {
 
     const provider = (body.config as ZcodeGeneratedConfig).provider[OPENCODE_PROVIDER_ID]!;
     const native = provider.models["gpt-5.6-luna"]!;
+    // On-disk shape: ZCode persists `variants`/`defaultVariant` and parses them into the
+    // in-memory `levels`/`defaultLevel` pair, so the exported document carries the on-disk
+    // names (src/clients/config-export/zcode.ts).
     expect(native.reasoning).toEqual({
       enabled: true,
-      levels: ["low", "medium", "high", "xhigh", "max"],
-      defaultLevel: "medium",
+      variants: ["low", "medium", "high", "xhigh", "max"],
+      defaultVariant: "medium",
     });
     const apiKeyModel = provider.models["a/m1"]!;
     expect(apiKeyModel.reasoning).toEqual({
       enabled: true,
-      levels: ["minimal", "low", "high"],
-      defaultLevel: "high",
+      variants: ["minimal", "low", "high"],
+      defaultVariant: "high",
     });
     expect(JSON.stringify(body.config)).not.toContain(REAL_LOOKING_KEY);
   }, 15_000);
