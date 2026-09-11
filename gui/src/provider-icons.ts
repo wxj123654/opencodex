@@ -159,6 +159,7 @@ const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
   "codebuddy-cn": "CodeBuddy CN",
   qoder: "Qoder",
   "qoder-cn": "Qoder CN",
+  devin: "Devin",
   "vercel-ai-gateway": "Vercel AI Gateway",
   vllm: "vLLM",
   litellm: "LiteLLM",

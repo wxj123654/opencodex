@@ -737,6 +737,41 @@ OpenCodex provides official adapter support for Qoder through the `qoder` (Globa
 - **Quota:** No public quota API is used, so totals and reset times are unavailable. Insufficient-credit errors (vendor code 118) surface as HTTP 429 `insufficient_quota`.
 - **Operators:** Qoder Global is operated by BRIGHT ZENITH PRIVATE LIMITED under the [product service terms](https://qoder.com/product-service); Qoder CN by 通义云启（杭州）信息技术有限公司 with Alibaba Cloud. Verify `ocx provider test qoder` (or `qoder-cn`) after configuring.
 
+### Devin (Cognition) SWE models
+
+The `devin` preset fronts Cognition's OpenAI-compatible endpoint at `https://api.cognition.ai/v1`,
+which serves the in-house SWE model family (`swe-1.7`, `swe-1.7-lightning` on Cerebras, `swe-1.6`)
+over ordinary `/chat/completions` with function calling and prompt caching. This is the per-token
+catalog surface; it is NOT the Devin session/agent API at `api.devin.ai`, which creates ACU-billed
+autonomous sessions on Cognition-managed VMs and has no chat-completions shape — that surface is
+deliberately not bridged.
+
+```json
+{
+  "providers": {
+    "devin": {
+      "adapter": "openai-chat",
+      "authMode": "key",
+      "baseUrl": "https://api.cognition.ai/v1",
+      "apiKey": "${DEVIN_API_KEY}"
+    }
+  }
+}
+```
+
+- **Authentication:** keys are Devin service user keys (`cog_` prefix) created under Settings →
+  Service users in the Devin app. Endpoint provisioning is customer-scoped; enterprises with a
+  dedicated deployment can point `baseUrl` at their own API domain, and live `/v1/models` discovery
+  (on by default) is authoritative over the static seed whenever it succeeds.
+- **Model ids:** the static seed follows the LiteLLM `cognition/` integration (`swe-1.7`,
+  `swe-1.7-lightning`, `swe-1.6`); a live discovery that returns different ids wins. `swe-1.7`
+  carries a 256K context window.
+- **Reasoning:** SWE-1.7 ships Max/Medium variants in Devin surfaces, but the chat API's effort
+  parameter is not publicly documented, so no reasoning ladder is advertised until it can be
+  verified; `reasoningEfforts` stays empty instead of risking an unverified wire field.
+- **Dashboard:** no vendor brand asset is committed, so the providers overview shows the default
+  initial tile.
+
 ### A6API credit quota
 
 A custom `openai-chat` provider using `authMode: "key"` and the canonical

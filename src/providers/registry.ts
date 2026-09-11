@@ -36,6 +36,7 @@ import {
   CODEBUDDY_REASONING_EFFORTS,
 } from "./codebuddy-models";
 import { QODER_CN_MODELS, QODER_GLOBAL_MODELS, QODER_REASONING_EFFORTS } from "./qoder-models";
+import { DEVIN_MODELS, DEVIN_MODEL_CONTEXT_WINDOWS } from "./devin-models";
 
 export type ProviderAuthKind = "forward" | "oauth" | "key" | "local";
 export type MetadataModelIdNormalize = "case-insensitive";
@@ -3440,6 +3441,30 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     modelDefaultReasoningEfforts: CODEBUDDY_CN_MODEL_DEFAULT_REASONING_EFFORTS,
     noVisionModels: CODEBUDDY_CN_NO_VISION_MODELS,
     note: "Official CodeBuddy Code CLI (Tencent Cloud), China/internal environment. Uses the documented CODEBUDDY_API_KEY + headless CLI surface; never reads desktop sessions or private console endpoints. Region-isolated from codebuddy (Global); credentials are never exchanged across regions. v1 disables CLI tools (--tools \"\"): text/reasoning only for now. Requires `npm i -g @tencent-ai/codebuddy-code`. AUP/routing authorization flagged for maintainer security review.",
+  },
+  {
+    // Cognition (Devin) OpenAI-compatible SWE-model catalog at api.cognition.ai/v1. This is
+    // the per-token chat surface LiteLLM integrates as the `cognition/` provider (cost map
+    // verified 2026-09, BerriAI/litellm#37743: function calling and prompt caching documented
+    // for all three ids). It is NOT the Devin session/agent API at api.devin.ai: that is an
+    // ACU-billed autonomous agent running its own VM and toolset, with no chat-completions
+    // shape, and is deliberately not bridged here.
+    // Enterprise-oriented provisioning (LiteLLM: "Cognition provisions API endpoints per
+    // customer today"); keys are Devin service user keys (cog_ prefix, Settings > Service
+    // users). No public reasoning_effort contract yet: SWE-1.7 ships Max/Medium variants in
+    // Devin surfaces, but the chat API's effort parameter is unverified, so no effort ladder
+    // is advertised until it can be probed.
+    id: "devin",
+    label: "Devin (Cognition)",
+    baseUrl: "https://api.cognition.ai/v1",
+    adapter: "openai-chat",
+    authKind: "key",
+    dashboardUrl: "https://app.devin.ai",
+    defaultModel: "swe-1.7",
+    models: [...DEVIN_MODELS],
+    liveModels: true,
+    modelContextWindows: DEVIN_MODEL_CONTEXT_WINDOWS,
+    note: "Cognition's OpenAI-compatible endpoint serving the in-house SWE model family (swe-1.7, swe-1.7-lightning on Cerebras, swe-1.6). Auth uses a Devin service user key (cog_ prefix) from Settings > Service users. Endpoint provisioning is customer-scoped; live /v1/models discovery is authoritative over the static seed. The Devin session/agent API (api.devin.ai, ACU-billed) is a separate surface not bridged by this entry.",
   },
 ];
 

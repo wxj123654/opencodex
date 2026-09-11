@@ -325,3 +325,14 @@ This one needs to stay written down. The wiring test only fires when an asset
 named after the provider id is already committed, so an absent mark produces no
 signal at all — nothing would stop a later pass from fetching that logo and
 committing it.
+
+### Devin (Cognition): terms unreviewed, fallback tile until then
+
+`devin` keeps the fallback tile. Cognition publishes brand assets (the
+cognition.com and app.devin.ai marks), but their service terms have not been
+reviewed for a brand-permission clause the way Qoder's and CodeBuddy's were, and
+the Qoder entry above shows the standard: a mark is committed only with the
+vendor terms checked and recorded. Absent that review, the safe state is the
+initials tile. If a later pass wants to wire `devin.svg`, start from Cognition's
+terms and a declared brand/press page, and record the clause here the way the
+Qoder and CodeBuddy entries do.
