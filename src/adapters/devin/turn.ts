@@ -52,6 +52,13 @@ export const DEVIN_PROFILE: CodingAgentProviderProfile = {
 
 const REQUEST_TIMEOUT_MS = 60_000;
 
+/**
+ * The only session mode the bridge will run a turn in. Live probe (2026-09-11): Devin's
+ * session/new advertises modes `accept-edits` (DEFAULT, write-capable), `ask` (read-only Q&A),
+ * `plan` (read-only planning), and `bypass`. The bridge hard-locks `ask` before every prompt.
+ */
+const READ_ONLY_MODE_ID = "ask";
+
 export interface DevinTurnDeps {
   spawn?: SpawnFn;
   which?: WhichFn;
@@ -173,11 +180,34 @@ export async function runDevinAcpTurn(
 
     // 2. Session on a scratch cwd with no MCP surface. The cwd is nominal: the bridge never
     // mediates workspace access for the agent (see the refusal handler above).
-    const newSession = await connection.request("session/new", (buildNewSessionRequest(2, deps.cwd ?? tmpdir()).params ?? {}) as Record<string, unknown>, REQUEST_TIMEOUT_MS) as { sessionId?: string; models?: AcpSessionModelState | null } | null;
+    const newSession = await connection.request("session/new", (buildNewSessionRequest(2, deps.cwd ?? tmpdir()).params ?? {}) as Record<string, unknown>, REQUEST_TIMEOUT_MS) as { sessionId?: string; models?: AcpSessionModelState | null; modes?: { availableModes?: Array<{ id?: string }>; currentModeId?: string } | null } | null;
     const sessionId = newSession?.sessionId;
     if (!sessionId || typeof sessionId !== "string") {
       emitOnce({ type: "error", message: "devin acp did not return a sessionId from session/new.", status: 502, errorType: "upstream_error", code: "protocol_error", retryable: false });
       return;
+    }
+
+    // 3. Lock the session to the read-only "ask" mode when the agent advertises modes. Live
+    // probe (2026-09-11, devin 3000.10.21): the DEFAULT mode is "accept-edits" (Code, i.e. the
+    // agent may write files locally) — leaving the vendor default in place would put a writer on
+    // the workspace for every routed turn. "ask" (read-only Q&A) is the enforced mode measured
+    // in 260910_cursor_acp_bridge/070 and advertised here as an explicit availableMode. The lock
+    // is best-effort: a refusal is a turn error rather than a silent continuation in a
+    // write-capable mode.
+    const availableModeIds = (newSession?.modes?.availableModes ?? []).map(mode => mode.id).filter((id): id is string => typeof id === "string");
+    if (availableModeIds.length > 0) {
+      if (!availableModeIds.includes(READ_ONLY_MODE_ID)) {
+        emitOnce({
+          type: "error",
+          message: `Devin session does not offer the read-only "${READ_ONLY_MODE_ID}" mode (available: ${availableModeIds.join(", ")}); refusing to run in a write-capable default mode.`,
+          status: 502,
+          errorType: "upstream_error",
+          code: "read_only_mode_unavailable",
+          retryable: false,
+        });
+        return;
+      }
+      await connection.request("session/set_mode", { sessionId, modeId: READ_ONLY_MODE_ID }, REQUEST_TIMEOUT_MS);
     }
 
     // 3. Model selection ONLY among agent-advertised ids: a routed id the agent did not advertise

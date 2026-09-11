@@ -210,9 +210,11 @@ function fakeAgentChild(responder: AgentResponder, opts: { stderr?: string; exit
 /** A compliant fake `devin acp`: answers the handshake, then streams updates and a stopReason. */
 function scriptedAgent(options: {
   models?: Array<{ modelId: string; name?: string }>;
+  modes?: { availableModes: Array<{ id: string; name: string }>; currentModeId: string } | null;
   updates?: Array<Record<string, unknown>>;
   stopReason?: string;
   sessionError?: { code: number; message: string };
+  setModeCalls?: string[];
 } = {}): (spawnArgs: { file: string; args: readonly string[] }) => FakeChild {
   return ({ args }) => {
     expect(args[0]).toBe("acp");
@@ -226,7 +228,32 @@ function scriptedAgent(options: {
           send({ jsonrpc: "2.0", id: message.id, error: options.sessionError });
           return;
         }
-        send({ jsonrpc: "2.0", id: message.id, result: { sessionId: "sess_test", models: options.models ? { availableModels: options.models, currentModelId: options.models[0]?.modelId } : null } });
+        // Live probe (2026-09-11, devin 3000.10.21): the REAL default is accept-edits (write-capable)
+        // with ask/plan/bypass also advertised. Mirror that so the mode lock is exercised.
+        send({
+          jsonrpc: "2.0",
+          id: message.id,
+          result: {
+            sessionId: "sess_test",
+            modes: options.modes === null
+              ? null
+              : options.modes ?? {
+                  currentModeId: "accept-edits",
+                  availableModes: [
+                    { id: "accept-edits", name: "Code" },
+                    { id: "ask", name: "Ask" },
+                    { id: "plan", name: "Plan" },
+                    { id: "bypass", name: "Bypass Permissions" },
+                  ],
+                },
+            models: options.models ? { availableModels: options.models, currentModelId: options.models[0]?.modelId } : null,
+          },
+        });
+        return;
+      }
+      if (message.method === "session/set_mode") {
+        options.setModeCalls?.push((message.params as { modeId: string }).modeId);
+        send({ jsonrpc: "2.0", id: message.id, result: {} });
         return;
       }
       if (message.method === "session/set_model") {
@@ -312,6 +339,26 @@ describe("devin ACP turn orchestration", () => {
     const withoutRoster = await runTurn(scriptedAgent({}));
     expect(withoutRoster.at(-1)).toMatchObject({ type: "done" });
     void setModelCalls;
+  });
+
+  test("locks the session to the read-only ask mode before every prompt", async () => {
+    const setModeCalls: string[] = [];
+    const events = await runTurn(scriptedAgent({ setModeCalls }));
+    expect(events.at(-1)).toMatchObject({ type: "done" });
+    // The vendor default is accept-edits (write-capable); the bridge must have switched to ask.
+    expect(setModeCalls).toEqual(["ask"]);
+  });
+
+  test("a session without the read-only ask mode fails closed instead of running write-capable", async () => {
+    const events = await runTurn(scriptedAgent({
+      modes: { currentModeId: "accept-edits", availableModes: [{ id: "accept-edits", name: "Code" }, { id: "bypass", name: "Bypass" }] },
+    }));
+    expect(events.at(-1)).toMatchObject({ type: "error", code: "read_only_mode_unavailable", status: 502 });
+  });
+
+  test("a session that advertises no modes at all still completes (older agents)", async () => {
+    const events = await runTurn(scriptedAgent({ modes: null }));
+    expect(events.at(-1)).toMatchObject({ type: "done" });
   });
 
   test("a routed model the agent does not advertise fails closed with model_not_advertised", async () => {
