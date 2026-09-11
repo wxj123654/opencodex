@@ -1,17 +1,17 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { createOpenAIChatAdapter } from "../src/adapters/openai-chat";
-import { buildClientConfigText } from "../src/clients/config-export";
-import { gatherRoutedModels } from "../src/codex/catalog";
-import { clearModelCache } from "../src/codex/model-cache";
-import { loadExportModels } from "../src/server/management/model-rows";
-import { KEY_LOGIN_PROVIDERS } from "../src/oauth/key-providers";
-import { enrichProviderFromRegistry, providerConfigSeed } from "../src/providers/derive";
-import { providerModelMatchesDiscoveryFilter } from "../src/providers/model-discovery";
-import { PROVIDER_REGISTRY } from "../src/providers/registry";
-import { configuredReasoningEfforts, mapReasoningEffort } from "../src/reasoning-effort";
-import { routeModel } from "../src/router";
-import type { OcxConfig, OcxParsedRequest } from "../src/types";
-import { withStubbedProviderFetch } from "./helpers/catalog-provider-fetch";
+import { createOpenAIChatAdapter } from "../../src/adapters/openai-chat";
+import { buildClientConfigText } from "../../src/clients/config-export";
+import { gatherRoutedModels } from "../../src/codex/catalog";
+import { clearModelCache } from "../../src/codex/model-cache";
+import { loadExportModels } from "../../src/server/management/model-rows";
+import { KEY_LOGIN_PROVIDERS } from "../../src/oauth/key-providers";
+import { enrichProviderFromRegistry, providerConfigSeed } from "../../src/providers/derive";
+import { providerModelMatchesDiscoveryFilter } from "../../src/providers/model-discovery";
+import { PROVIDER_REGISTRY } from "../../src/providers/registry";
+import { configuredReasoningEfforts, mapReasoningEffort } from "../../src/reasoning-effort";
+import { routeModel } from "../../src/router";
+import type { OcxConfig, OcxParsedRequest } from "../../src/types";
+import { withStubbedProviderFetch } from "../helpers/catalog-provider-fetch";
 
 const OFFICIAL_ELECTRONHUB_CODING_PLAN_MODELS = [
   "glm-5.3-flash:dev",

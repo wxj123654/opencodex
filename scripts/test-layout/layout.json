@@ -624,6 +624,7 @@
     "dsh-rc6-compat-script.test.ts": "ci-workflows",
     "dsh-writer-lock.test.ts": "ci-workflows",
     "effort-policy.test.ts": "codex-integration",
+    "electronhub-coding-plan-provider.test.ts": "providers",
     "empty-completion-core.test.ts": "responses",
     "empty-completion-guard.test.ts": "responses",
     "empty-completion-hardening.test.ts": "responses",
