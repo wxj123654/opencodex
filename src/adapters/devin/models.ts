@@ -37,7 +37,15 @@ export function setFetchDevinModelsForTests(next: DevinModelsFetcher | null): vo
   devinModelsFetcherForTests = next;
 }
 
-/** Tolerant parse of the `devin models list --format json` output. Exported for unit tests. */
+/** Tolerant parse of the `devin models list --format json` output. Exported for unit tests.
+ *
+ * Two shapes are accepted:
+ * - LIVE (verified against devin 3000.10.21, 2026-09-11): `{families: [{slug, variants:
+ *   [{model_uid, max_context_tokens, ...}]}]}`. Each variant yields one model id; the family
+ *   slug is NOT prepended (model_uid values are already globally unique, e.g. `swe-2-medium`).
+ * - LEGACY/tolerant: a bare array, `{models: [...]}`, or `{data: [...]}` of plain string ids or
+ *   `{id | modelId}` rows, kept so a future CLI format change degrades instead of crashing.
+ */
 export function parseDevinModelList(stdout: string): DevinModelsResult {
   if (Buffer.byteLength(stdout) > MAX_OUTPUT_BYTES) return { ok: false, error: "too_large" };
   let parsed: unknown;
@@ -45,6 +53,9 @@ export function parseDevinModelList(stdout: string): DevinModelsResult {
     parsed = JSON.parse(stdout);
   } catch {
     return { ok: false, error: "invalid_output", detail: "output is not JSON" };
+  }
+  if (parsed !== null && typeof parsed === "object" && Array.isArray((parsed as { families?: unknown }).families)) {
+    return parseFamilyRoster((parsed as { families: unknown[] }).families);
   }
   const rows: unknown = Array.isArray(parsed)
     ? parsed
@@ -54,7 +65,7 @@ export function parseDevinModelList(stdout: string): DevinModelsResult {
         ? (parsed as { data: unknown[] }).data
         : undefined;
   if (!Array.isArray(rows)) {
-    return { ok: false, error: "invalid_output", detail: "expected an array of model rows" };
+    return { ok: false, error: "invalid_output", detail: "expected a families roster or an array of model rows" };
   }
   const models: string[] = [];
   const seen = new Set<string>();
@@ -66,6 +77,25 @@ export function parseDevinModelList(stdout: string): DevinModelsResult {
     seen.add(id);
     models.push(id);
     if (models.length >= MAX_MODELS) break;
+  }
+  return models.length > 0 ? { ok: true, models } : { ok: false, error: "empty" };
+}
+
+/** Flatten the live families roster into deduped model ids (model_uid per variant). */
+function parseFamilyRoster(families: unknown[]): DevinModelsResult {
+  const models: string[] = [];
+  const seen = new Set<string>();
+  for (const family of families) {
+    const variants = family !== null && typeof family === "object" && Array.isArray((family as { variants?: unknown }).variants)
+      ? (family as { variants: unknown[] }).variants
+      : [];
+    for (const variant of variants) {
+      const id = variant !== null && typeof variant === "object" ? (variant as { model_uid?: unknown }).model_uid : undefined;
+      if (typeof id !== "string" || !id || seen.has(id) || !isValidModelDiscoveryModelId(id)) continue;
+      seen.add(id);
+      models.push(id);
+      if (models.length >= MAX_MODELS) return { ok: true, models };
+    }
   }
   return models.length > 0 ? { ok: true, models } : { ok: false, error: "empty" };
 }

@@ -44,13 +44,17 @@ describe("Devin provider split: CLI bridge vs per-token API", () => {
       baseUrl: "https://cli.devin.ai",
       authKind: "key",
       keyOptional: true,
-      defaultModel: "swe-1.7",
+      defaultModel: "swe-2-medium",
       liveModels: true,
     });
-    expect(entry.models).toEqual(["swe-1.7", "swe-1.7-lightning", "swe-1.6"]);
+    // Ids verified LIVE against devin 3000.10.21 (2026-09-11): the CLI uses hyphenated
+    // model_uid spellings, and swe-2 is the newest Cognition family.
+    expect(entry.models).toEqual(["swe-2-medium", "swe-2-high", "swe-2-max", "swe-1-7", "swe-1-7-lightning", "swe-1-6"]);
+    expect(entry.modelContextWindows?.["swe-2-medium"]).toBe(262_000);
+    expect(entry.modelContextWindows?.["swe-1-7-lightning"]).toBe(202_752);
     // Contract honesty: the note must carry the agent-vs-model boundary for operators.
     expect(entry.note).toContain("ignores Codex's tool list");
-    expect(entry.note).toContain("devin auth login");
+    expect(entry.note).toContain("ask");
   });
 
   test("the devin-api entry keeps the per-token Cognition catalog on openai-chat", () => {
@@ -80,8 +84,9 @@ describe("Devin provider split: CLI bridge vs per-token API", () => {
       const initRow = buildInitProviders().find(row => row.id === id);
       expect(initRow).toBeDefined();
       expect(deriveProviderPresets().find(row => row.id === id)).toBeDefined();
-      expect(providerConfigSeed(registryEntry(id)).models).toEqual(["swe-1.7", "swe-1.7-lightning", "swe-1.6"]);
     }
+    expect(providerConfigSeed(registryEntry("devin")).models).toEqual(["swe-2-medium", "swe-2-high", "swe-2-max", "swe-1-7", "swe-1-7-lightning", "swe-1-6"]);
+    expect(providerConfigSeed(registryEntry("devin-api")).models).toEqual(["swe-1.7", "swe-1.7-lightning", "swe-1.6"]);
     // The CLI entry seeds WITHOUT a credential: the local devin auth login cache is the default
     // authority, so the seed must not fabricate a key requirement beyond authMode itself.
     expect(providerConfigSeed(registryEntry("devin"))).toMatchObject({
@@ -92,8 +97,8 @@ describe("Devin provider split: CLI bridge vs per-token API", () => {
   });
 
   test("routes devin/<model> to the ACP adapter without an apiKey requirement", () => {
-    const route = routeModel(devinConfig(), "devin/swe-1.7");
-    expect(route.modelId).toBe("swe-1.7");
+    const route = routeModel(devinConfig(), "devin/swe-2-medium");
+    expect(route.modelId).toBe("swe-2-medium");
     expect(route.provider.adapter).toBe("devin");
     expect(route.provider.baseUrl).toBe("https://cli.devin.ai");
     expect(route.provider.apiKey).toBeUndefined();

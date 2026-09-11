@@ -60,3 +60,36 @@ not actually use it. This unit bridges `devin acp` — the Devin CLI's Agent Cli
 3. Image content blocks are text-only in v1 prompts.
 4. Session continuity (`session/load`) is deliberately out; each HTTP turn is one fresh agent
    process with replayed history.
+
+## Post-landing live verification (2026-09-11, same day)
+
+Installed `devin-cli` 3000.10.21 via Homebrew, logged in with a Free-plan
+account, and re-ran every residual against the real agent:
+
+1. **CLOSED.** Handshake observed live: `protocolVersion: 1`, agent
+   "Devin Agent (affogato)", `promptCapabilities.image: true`,
+   `authMethods: [devin-browser]`. Real `session/new` returns `modes`
+   (accept-edits DEFAULT write-capable / ask / plan / bypass) and no `models`
+   roster on the session response.
+2. **CLOSED with a safety hardening.** Because the vendor default mode is
+   write-capable, the bridge now hard-locks `session/set_mode` to `ask` before
+   every prompt and fails closed (`read_only_mode_unavailable`, 502) when the
+   agent does not offer it (commit d92857c70).
+3. **CLOSED.** Real `models list --format json` shape is
+   `{families: [{slug, variants: [{model_uid, max_context_tokens}]}]}` — the
+   tolerant parser was extended to flatten it (model_uid is globally unique;
+   family slug is not prepended). Ids are HYPHENATED (`swe-1-7`, not
+   `swe-1.7`); the registry seed was corrected to the live spellings and
+   SWE-2 (swe-2-medium/high/max, 262000 context) is the new default family.
+4. **CLOSED.** Full end-to-end through the real proxy: `POST
+   /v1/chat/completions` with `devin/swe-2-medium` streamed a real SWE-2
+   answer ("I'm powered by SWE-2 High.") over SSE; `/api/models` shows the
+   live account roster (256-model cap truncates only part of the long
+   `fusion-*` combinatorial tail; every core family id survives).
+
+New residuals: the model self-identified as "SWE-2 High" when routed to
+`swe-2-medium` (unverified whether the server remaps variants for Free plans
+or the model misreports); ACP `session/new` carries no `models` roster on
+this version, so per-turn `session/set_model` is currently skipped when the
+field is absent and the roster only feeds discovery — acceptable, but worth
+re-checking on CLI upgrades.

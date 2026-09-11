@@ -36,7 +36,7 @@ import {
   CODEBUDDY_REASONING_EFFORTS,
 } from "./codebuddy-models";
 import { QODER_CN_MODELS, QODER_GLOBAL_MODELS, QODER_REASONING_EFFORTS } from "./qoder-models";
-import { DEVIN_MODELS, DEVIN_MODEL_CONTEXT_WINDOWS } from "./devin-models";
+import { DEVIN_API_MODELS, DEVIN_API_MODEL_CONTEXT_WINDOWS, DEVIN_CLI_MODELS, DEVIN_CLI_MODEL_CONTEXT_WINDOWS } from "./devin-models";
 
 export type ProviderAuthKind = "forward" | "oauth" | "key" | "local";
 export type MetadataModelIdNormalize = "case-insensitive";
@@ -3455,9 +3455,9 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     authKind: "key",
     dashboardUrl: "https://app.devin.ai",
     defaultModel: "swe-1.7",
-    models: [...DEVIN_MODELS],
+    models: [...DEVIN_API_MODELS],
     liveModels: true,
-    modelContextWindows: DEVIN_MODEL_CONTEXT_WINDOWS,
+    modelContextWindows: DEVIN_API_MODEL_CONTEXT_WINDOWS,
     note: "Cognition's OpenAI-compatible endpoint serving the in-house SWE model family (swe-1.7, swe-1.7-lightning on Cerebras, swe-1.6). Auth uses a Devin service user key (cog_ prefix) from Settings > Service users — requires a Teams or Enterprise plan; self-serve users should use the `devin` CLI provider instead. Endpoint provisioning is customer-scoped; live /v1/models discovery is authoritative over the static seed.",
   },
   {
@@ -3481,10 +3481,11 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     apiKeyValidation: "unknown",
     preserveCustomDestination: true,
     dashboardUrl: "https://app.devin.ai",
-    defaultModel: "swe-1.7",
-    models: [...DEVIN_MODELS],
+    defaultModel: "swe-2-medium",
+    models: [...DEVIN_CLI_MODELS],
     liveModels: true,
-    note: "Bridges the official Devin CLI (`devin acp`, Agent Client Protocol over stdio) as a text/reasoning channel. Requires the CLI: `curl -fsSL https://cli.devin.ai/install.sh | bash`, then `devin auth login` (Free plan eligible); a DEVIN_API_KEY-compatible provider key is optional. The agent keeps its own tools and ignores Codex's tool list; permission requests are always declined. Model roster is account-specific via `devin models list --format json`; the static seed is a fallback. Not an OpenAI-compatible endpoint — see `devin-api` for the per-token catalog.",
+    modelContextWindows: DEVIN_CLI_MODEL_CONTEXT_WINDOWS,
+    note: "Bridges the official Devin CLI (`devin acp`, Agent Client Protocol over stdio) as a text/reasoning channel. Requires the CLI: `curl -fsSL https://cli.devin.ai/install.sh | bash`, then `devin auth login` (Free plan eligible); a DEVIN_API_KEY-compatible provider key is optional. The agent keeps its own tools and ignores Codex's tool list; permission requests are always declined and sessions are locked to the read-only ask mode. Model roster is account-specific via `devin models list --format json` (ids verified live: swe-2-medium is the newest Cognition family); the static seed is a fallback. Not an OpenAI-compatible endpoint — see `devin-api` for the per-token catalog.",
   },
 ];
 
