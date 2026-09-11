@@ -1,6 +1,7 @@
 // ZCode config export.
-import type { ExportContext, ExportModel, ManagedContribution } from "./contracts";
+import type { ExportContext, ManagedContribution } from "./contracts";
 import { normalizeExportModels, inputModalitiesForClient, exportModelLabel, authoritativeContextWindow, singleFragment } from "./model-metadata";
+import { sanitizeCodexReasoningEfforts } from "../../reasoning-effort";
 import { OPENCODE_PROVIDER_ID, LOOPBACK_API_KEY_PLACEHOLDER } from "./constants";
 
 
@@ -10,18 +11,21 @@ import { OPENCODE_PROVIDER_ID, LOOPBACK_API_KEY_PLACEHOLDER } from "./constants"
  * OpenAI Chat Completions protocol, which the proxy serves at `/v1/chat/completions`.
  * `apiKeyRequired` keeps ZCode's UI from prompting for a key it does not need on
  * loopback; the serialized key is always the non-secret loopback placeholder.
- * `reasoning.levels` and `reasoning.defaultLevel` are the model-level effort
- * fields used by the current ZCode catalog.
  */
 export interface ZcodeModelEntry {
   name?: string;
-  reasoning?: {
-    enabled: true;
-    levels: string[];
-    defaultLevel?: string;
-  };
   limit?: { context: number; output?: number };
   modalities: { input: string[]; output: string[] };
+  /**
+   * On-disk Thought Level block. ZCode 3.x persists `variants`/`defaultVariant`
+   * and parses them into in-memory `levels`/`defaultLevel`. Omit the field when
+   * the catalog has no selectable ladder, so the picker stays hidden.
+   */
+  reasoning?: {
+    enabled: boolean;
+    variants: string[];
+    defaultVariant?: string;
+  };
 }
 
 export interface ZcodeProviderBlock {
@@ -50,33 +54,14 @@ export interface ZcodeGeneratedConfig {
  * without `limit` rather than guessing. Modalities are ZCode's observed
  * `text`-floor vocabulary; image-capable rows advertise image input.
  */
-function zcodeReasoning(model: ExportModel): ZcodeModelEntry["reasoning"] | undefined {
-  // `none` is an internal catalog sentinel (reasoning off), not a selectable
-  // ZCode level — the same rule the MCode ladder applies.
-  const levels: string[] = [];
-  for (const raw of model.reasoningEfforts ?? []) {
-    const level = raw.trim().toLowerCase();
-    if (level.length > 0 && level !== "none" && !levels.includes(level)) levels.push(level);
-  }
-  if (levels.length === 0) return undefined;
-  const defaultLevel = model.defaultReasoningEffort?.trim().toLowerCase();
-  return {
-    enabled: true,
-    levels,
-    ...(defaultLevel && levels.includes(defaultLevel) ? { defaultLevel } : {}),
-  };
-}
-
 export function buildZcodeClientConfig(ctx: ExportContext): ZcodeGeneratedConfig {
   const models: Record<string, ZcodeModelEntry> = {};
   for (const model of normalizeExportModels(ctx.models)) {
     const input = inputModalitiesForClient("pi", model.inputModalities);
     if (input === null) continue;
-    const reasoning = zcodeReasoning(model);
     const entry: ZcodeModelEntry = {
       name: exportModelLabel(model),
       modalities: { input, output: ["text"] },
-      ...(reasoning ? { reasoning } : {}),
     };
     // `limit.context` follows the authoritative-window rule. `output` is
     // deliberately absent: ZCode's schema makes it optional and we have no
@@ -86,6 +71,19 @@ export function buildZcodeClientConfig(ctx: ExportContext): ZcodeGeneratedConfig
     const context = authoritativeContextWindow(model.contextWindow);
     if (context !== undefined) {
       entry.limit = { context };
+    }
+    // `none` is a Codex omit-sentinel, not a ZCode picker option. Keep catalog
+    // `ultra` when present: ZCode forwards the selected variant as
+    // `reasoning_effort`. Set `defaultVariant` only when it survives that filter.
+    const efforts = sanitizeCodexReasoningEfforts(model.reasoningEfforts)
+      ?.filter(effort => effort !== "none");
+    if (efforts && efforts.length > 0) {
+      const defaultVariant = model.defaultReasoningEffort?.trim().toLowerCase();
+      entry.reasoning = {
+        enabled: true,
+        variants: efforts,
+        ...(defaultVariant && efforts.includes(defaultVariant) ? { defaultVariant } : {}),
+      };
     }
     models[model.namespaced] = entry;
   }
