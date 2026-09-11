@@ -12,8 +12,9 @@ import { delimiter, join } from "node:path";
 export interface CodingAgentProviderProfile {
   /** Canonical OpenCodex provider id this profile serves. */
   providerId: string;
-  /** Vendor family; selects the arg/env builder in the family adapter. */
-  family: "codebuddy" | "qoder";
+  /** Vendor family; selects the arg/env builder in the family adapter. "devin" carries its own
+   * turn (ACP, not stream-json) so the shared runner never sees it. */
+  family: "codebuddy" | "qoder" | "devin";
   /** Region; drives the vendor's own region switch and keeps credentials deterministic. */
   region: "global" | "cn";
   /** Human label for diagnostics/error copy (never sent upstream). */

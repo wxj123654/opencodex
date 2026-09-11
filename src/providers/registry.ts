@@ -3443,19 +3443,13 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     note: "Official CodeBuddy Code CLI (Tencent Cloud), China/internal environment. Uses the documented CODEBUDDY_API_KEY + headless CLI surface; never reads desktop sessions or private console endpoints. Region-isolated from codebuddy (Global); credentials are never exchanged across regions. v1 disables CLI tools (--tools \"\"): text/reasoning only for now. Requires `npm i -g @tencent-ai/codebuddy-code`. AUP/routing authorization flagged for maintainer security review.",
   },
   {
-    // Cognition (Devin) OpenAI-compatible SWE-model catalog at api.cognition.ai/v1. This is
-    // the per-token chat surface LiteLLM integrates as the `cognition/` provider (cost map
-    // verified 2026-09, BerriAI/litellm#37743: function calling and prompt caching documented
-    // for all three ids). It is NOT the Devin session/agent API at api.devin.ai: that is an
-    // ACU-billed autonomous agent running its own VM and toolset, with no chat-completions
-    // shape, and is deliberately not bridged here.
-    // Enterprise-oriented provisioning (LiteLLM: "Cognition provisions API endpoints per
-    // customer today"); keys are Devin service user keys (cog_ prefix, Settings > Service
-    // users). No public reasoning_effort contract yet: SWE-1.7 ships Max/Medium variants in
-    // Devin surfaces, but the chat API's effort parameter is unverified, so no effort ladder
-    // is advertised until it can be probed.
-    id: "devin",
-    label: "Devin (Cognition)",
+    // Cognition's per-token OpenAI-compatible SWE catalog (api.cognition.ai/v1). Enterprise/self-serve
+    // Teams+ provisioning only — a self-serve user without a Teams plan cannot obtain a cog_ key;
+    // the `devin` entry below is the Free-plan-eligible path. The session/agent API at
+    // api.devin.ai (ACU-billed cloud sessions) is a different surface and is deliberately not
+    // bridged here.
+    id: "devin-api",
+    label: "Devin API (Cognition)",
     baseUrl: "https://api.cognition.ai/v1",
     adapter: "openai-chat",
     authKind: "key",
@@ -3464,7 +3458,33 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     models: [...DEVIN_MODELS],
     liveModels: true,
     modelContextWindows: DEVIN_MODEL_CONTEXT_WINDOWS,
-    note: "Cognition's OpenAI-compatible endpoint serving the in-house SWE model family (swe-1.7, swe-1.7-lightning on Cerebras, swe-1.6). Auth uses a Devin service user key (cog_ prefix) from Settings > Service users. Endpoint provisioning is customer-scoped; live /v1/models discovery is authoritative over the static seed. The Devin session/agent API (api.devin.ai, ACU-billed) is a separate surface not bridged by this entry.",
+    note: "Cognition's OpenAI-compatible endpoint serving the in-house SWE model family (swe-1.7, swe-1.7-lightning on Cerebras, swe-1.6). Auth uses a Devin service user key (cog_ prefix) from Settings > Service users — requires a Teams or Enterprise plan; self-serve users should use the `devin` CLI provider instead. Endpoint provisioning is customer-scoped; live /v1/models discovery is authoritative over the static seed.",
+  },
+  {
+    // Devin CLI bridge: the ONLY self-serve path to Devin's models. `devin acp` speaks the Agent
+    // Client Protocol (JSON-RPC over stdio NDJSON); `devin auth login` works on the Free plan and
+    // the credential cache persists without expiry. Design + trust boundary:
+    // devlog/_plan/260911_devin_acp_bridge/000_plan.md, with the protocol-tradeoff analysis in
+    // devlog/_plan/260910_cursor_acp_bridge/040_feasibility_verdict.md.
+    // CONTRACT HONESTY: ProviderAdapter is a model port and ACP delivers an agent. The bridge is
+    // text/reasoning only — the agent ignores Codex's tool list, and its mediation points are
+    // discretionary: the bridge refuses every session/request_permission and never offers
+    // fs/terminal capabilities, but tool execution the agent performs locally cannot be blocked
+    // from here. The apiKey is OPTIONAL: an absent key relies on the local devin auth login
+    // cache, so the config never needs a credential pasted for this provider to work.
+    id: "devin",
+    label: "Devin CLI (ACP)",
+    baseUrl: "https://cli.devin.ai",
+    adapter: "devin",
+    authKind: "key",
+    keyOptional: true,
+    apiKeyValidation: "unknown",
+    preserveCustomDestination: true,
+    dashboardUrl: "https://app.devin.ai",
+    defaultModel: "swe-1.7",
+    models: [...DEVIN_MODELS],
+    liveModels: true,
+    note: "Bridges the official Devin CLI (`devin acp`, Agent Client Protocol over stdio) as a text/reasoning channel. Requires the CLI: `curl -fsSL https://cli.devin.ai/install.sh | bash`, then `devin auth login` (Free plan eligible); a DEVIN_API_KEY-compatible provider key is optional. The agent keeps its own tools and ignores Codex's tool list; permission requests are always declined. Model roster is account-specific via `devin models list --format json`; the static seed is a fallback. Not an OpenAI-compatible endpoint — see `devin-api` for the per-token catalog.",
   },
 ];
 

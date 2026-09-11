@@ -159,7 +159,10 @@ const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
   "codebuddy-cn": "CodeBuddy CN",
   qoder: "Qoder",
   "qoder-cn": "Qoder CN",
-  devin: "Devin",
+  // Devin is split by transport: the ACP CLI bridge (Free-plan self-serve) vs the per-token
+  // api.cognition.ai catalog (Teams/Enterprise service-user keys).
+  devin: "Devin CLI",
+  "devin-api": "Devin API",
   "vercel-ai-gateway": "Vercel AI Gateway",
   vllm: "vLLM",
   litellm: "LiteLLM",

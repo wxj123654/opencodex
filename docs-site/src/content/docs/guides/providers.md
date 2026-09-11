@@ -739,17 +739,59 @@ OpenCodex provides official adapter support for Qoder through the `qoder` (Globa
 
 ### Devin (Cognition) SWE models
 
-The `devin` preset fronts Cognition's OpenAI-compatible endpoint at `https://api.cognition.ai/v1`,
-which serves the in-house SWE model family (`swe-1.7`, `swe-1.7-lightning` on Cerebras, `swe-1.6`)
-over ordinary `/chat/completions` with function calling and prompt caching. This is the per-token
-catalog surface; it is NOT the Devin session/agent API at `api.devin.ai`, which creates ACU-billed
-autonomous sessions on Cognition-managed VMs and has no chat-completions shape — that surface is
-deliberately not bridged.
+Devin's models are reachable through two distinct surfaces, and OpenCodex ships both under
+separate provider ids:
+
+- **`devin` — the official Devin CLI bridge (self-serve).** Runs `devin acp` (the Agent Client
+  Protocol JSON-RPC stdio agent) as a child process and streams its output as the model response.
+  `devin auth login` works on the **Free** plan, so this is the only path a self-serve user can
+  actually use.
+- **`devin-api` — the per-token OpenAI-compatible catalog.** `https://api.cognition.ai/v1` serves
+  the in-house SWE model family (`swe-1.7`, `swe-1.7-lightning` on Cerebras, `swe-1.6`) over
+  ordinary `/chat/completions` with function calling and prompt caching. Keys are `cog_` service
+  user keys, which require a **Teams ($80/mo) or Enterprise** plan.
+
+The autonomous session API at `api.devin.ai` (ACU-billed cloud Devin sessions) is a third surface
+with no chat-completions shape and is deliberately not bridged by either entry.
+
+#### Devin CLI (ACP) — self-serve
 
 ```json
 {
   "providers": {
     "devin": {
+      "adapter": "devin",
+      "authMode": "key",
+      "baseUrl": "https://cli.devin.ai"
+    }
+  }
+}
+```
+
+- **Prerequisites:** install the CLI (`curl -fsSL https://cli.devin.ai/install.sh | bash` or
+  `brew install --cask devin-cli`), then run `devin auth login` once — the credential cache
+  persists and never expires by default. A `DEVIN_API_KEY`-compatible provider key is OPTIONAL;
+  the local login cache is the default authority.
+- **Contract honesty:** this is a text/reasoning channel through a vendor **agent**, not an
+  OpenAI-compatible endpoint. The agent gathers its own context with its own tools and ignores
+  Codex's tool list; Codex keeps tool and session ownership, and conversation history is replayed
+  into each turn. The bridge refuses every ACP permission request and never offers fs/terminal
+  capabilities, but tool execution the agent performs locally cannot be blocked from inside the
+  proxy — treat the turn as untrusted-agent output, same trust level as running the Devin CLI
+  yourself.
+- **Model roster:** account-specific via `devin models list --format json` (families: Cognition
+  SWE, Anthropic, OpenAI, Google, open source). Discovery is live; the static seed (`swe-1.7`,
+  `swe-1.7-lightning`, `swe-1.6`) is only a fallback. A routed model the agent does not advertise
+  fails closed with `model_not_advertised`.
+- **Billing:** draws the logged-in Devin account's included quota / credits (see `/usage` in the
+  CLI), same as interactive CLI use.
+
+#### Devin API — per-token catalog (Teams/Enterprise)
+
+```json
+{
+  "providers": {
+    "devin-api": {
       "adapter": "openai-chat",
       "authMode": "key",
       "baseUrl": "https://api.cognition.ai/v1",
@@ -760,9 +802,10 @@ deliberately not bridged.
 ```
 
 - **Authentication:** keys are Devin service user keys (`cog_` prefix) created under Settings →
-  Service users in the Devin app. Endpoint provisioning is customer-scoped; enterprises with a
-  dedicated deployment can point `baseUrl` at their own API domain, and live `/v1/models` discovery
-  (on by default) is authoritative over the static seed whenever it succeeds.
+  Service users in the Devin app, which requires a Teams or Enterprise organization. Endpoint
+  provisioning is customer-scoped; enterprises with a dedicated deployment can point `baseUrl` at
+  their own API domain, and live `/v1/models` discovery (on by default) is authoritative over the
+  static seed whenever it succeeds.
 - **Model ids:** the static seed follows the LiteLLM `cognition/` integration (`swe-1.7`,
   `swe-1.7-lightning`, `swe-1.6`); a live discovery that returns different ids wins. `swe-1.7`
   carries a 256K context window.

@@ -444,6 +444,7 @@
   "desktop-app-restart.test.ts": "clients",
   "desktop-profile.test.ts": "clients",
   "desktop-remote-store.test.ts": "clients",
+  "devin-adapter.test.ts": "providers",
   "devin-provider.test.ts": "providers",
   "destination-policy-resolved.test.ts": "routing",
   "digitalocean-scaleway-provider.test.ts": "providers",
