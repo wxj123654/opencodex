@@ -52,7 +52,6 @@ import { CODEX_GPT5_IDENTITY_LINE } from "../../adapters/identity";
 import { filterCursorConfiguredModelsByLiveDiscovery } from "../../adapters/cursor/discovery";
 import { fetchCursorUsableModels } from "../../adapters/cursor/live-models";
 import { recordLiveCursorClaudeModels, recordLiveCursorMaxModeModels } from "../../adapters/cursor/catalog";
-import { fetchDevinModels } from "../../adapters/devin/models";
 import { fetchDevinHttpModelsLive } from "../../adapters/devin-http/discovery";
 import { fetchQoderModels } from "../../adapters/qoder/live-models";
 import { resolveQoderProfile } from "../../adapters/qoder/profiles";
@@ -1754,53 +1753,6 @@ async function fetchProviderModelsWithAuth(
     const staleHttp = getStaleCached(name);
     return observed(withConfiguredRetention(
       staleHttp ? applyConfigHintsToCachedModels(name, prov, staleHttp, contextCap, metadataModelIdCaseFold, captured.effectiveAlias) : configured,
-    ), "degraded");
-  }
-  if (prov.adapter === "devin") {
-    // Devin's roster is account-specific and fetched by a child `devin models list --format json`
-    // run against the LOCAL login cache, so there is no per-key authority identity to bind: the
-    // CLI's own credential cache IS the authority. Fresh/stale/seed degradation matches cursor.
-    const cachedDevin = getFreshCached(name, ttlMs);
-    if (cachedDevin) {
-      return observed(
-        withConfiguredRetention(applyConfigHintsToCachedModels(name, prov, cachedDevin, contextCap, metadataModelIdCaseFold, captured.effectiveAlias)),
-        "authoritative",
-      );
-    }
-    if (isModelsFetchCoolingDown(name)) {
-      const cooling = getStaleCached(name);
-      return observed(
-        withConfiguredRetention(
-          cooling ? applyConfigHintsToCachedModels(name, prov, cooling, contextCap, metadataModelIdCaseFold, captured.effectiveAlias) : configured,
-        ),
-        "degraded",
-      );
-    }
-    const live = await fetchDevinModels();
-    if (live.ok) {
-      // Variant suffixes were folded into effort ladders by the parser; seed-external bases
-      // keep the live ladder, seed-internal ones get the maintainer-calibrated registry hints.
-      const discovered = live.models.map(model => ({
-        id: model.id,
-        provider: name,
-        ...(model.efforts.length > 0 ? { reasoningEfforts: model.efforts } : {}),
-        ...catalogHintsFromProviderConfig(name, prov, model.id, contextCap, metadataModelIdCaseFold, captured.effectiveAlias),
-      }));
-      const forCache = withConfiguredRetention(discovered, { retainComboTargets: false });
-      if (!setCached(name, forCache, Date.now(), cacheGeneration)) {
-        return observed(withConfiguredRetention(configured), "degraded");
-      }
-      markProviderDiscoveryOk(name, live.models.length);
-      return observed(withConfiguredRetention(forCache, { warnDrops: true }), "authoritative");
-    }
-    if (isCurrentCacheGeneration()) {
-      markModelsFetchFailure(name);
-      markProviderDiscoveryFailed(name, { reason: "provider" });
-      console.warn(`[opencodex] Devin model discovery for "${name}" failed [${live.error}]${live.detail ? `: ${live.detail}` : ""}; using stale/static catalog degradation.`);
-    }
-    const staleDevin = getStaleCached(name);
-    return observed(withConfiguredRetention(
-      staleDevin ? applyConfigHintsToCachedModels(name, prov, staleDevin, contextCap, metadataModelIdCaseFold, captured.effectiveAlias) : configured,
     ), "degraded");
   }
   if (prov.adapter === "cursor") {

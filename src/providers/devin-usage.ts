@@ -1,24 +1,12 @@
 /**
- * Devin account quota — direct `GetUserStatus` RPC, with the CLI cache as a fallback.
+ * Devin account quota — direct `GetUserStatus` RPC.
  *
- * Two credentials reach the same account, so this module offers two readers:
- *
- * 1. `fetchDevinQuotaLive(token)` — calls the seat-management `GetUserStatus` RPC directly.
- *    The RPC accepts the stored session token verbatim in a plain protobuf `Metadata` envelope:
- *    no signature, no per-call nonce, no credential transform (verified 2026-09-12 against the
- *    live service; the encoded response decodes to the same plan window the CLI cache reports).
- *    This is the reader the `devin-http` provider uses, because that provider already holds the
- *    token for its chat path.
- *
- * 2. `fetchDevinUsageSnapshot()` — reads the CLI's own `user_status.<digest>.bin` cache. The `devin`
- *    (ACP) provider uses this one: it deliberately never handles the credential itself (the child
- *    CLI owns the login), so reading the cache keeps the ACP path's credential boundary intact.
- *
- * The distinction matters. An earlier revision of this module stated that the RPC "is not
- * replayable from outside" because the CLI encrypts its Authorization header and signs a per-call
- * nonce. That describes the CLI's OWN request shape, not the server's requirement: a plain
- * `application/proto` request with the raw token is accepted. The cache reader stays because it is
- * still the right shape for the CLI-bridge provider, not because the RPC is unavailable.
+ * `fetchDevinQuotaLive(token)` calls the seat-management `GetUserStatus` RPC directly.
+ * The RPC accepts the stored session token verbatim in a plain protobuf `Metadata` envelope:
+ * no signature, no per-call nonce, no credential transform (verified 2026-09-12 against the
+ * live service; the encoded response decodes to the same plan window the CLI cache reports).
+ * This is the reader the `devin-http` provider uses, because that provider already holds the
+ * token for its chat path.
  *
  * Field numbers below are read off the live wire (devin 3000.10.21, 2026-09-11/12) with a generic
  * decoder, cross-checked against the schema strings in the CLI binary:
@@ -27,88 +15,9 @@
  *     field 14 = daily_quota_remaining_percent, field 15 = weekly_quota_remaining_percent
  *   plan_status → field 1 (plan/user info) → field 2 = plan name ("Pro"/"Max"/...)
  */
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
 import type { ProviderQuota } from "./quota-types";
 import { buildDevinMetadata, DEVIN_CASCADE_BASE_URL } from "../adapters/devin-http/client";
 import { encodeGetUserJwtRequest } from "../adapters/devin-http/proto";
-
-/**
- * Devin CLI account quota — read from the CLI's own GetUserStatus cache.
- *
- * The Devin CLI (chisel) refreshes `~/.cache/devin/cli/user_status.<digest>.bin` on every
- * authenticated run: a JSON envelope `{version, identity_digest, fetched_at_secs, payload}`
- * whose `payload` is the base64 protobuf of the seat-management `GetUserStatusResponse`.
- * That response carries the account's plan windows — `plan_status.daily_quota_remaining_percent`,
- * `weekly_quota_remaining_percent`, and the matching reset timestamps.
- *
- * opencodex deliberately does NOT re-derive the seat-management RPC: the CLI layers an
- * encrypted credential transform over the plain API key that we do not reproduce, and a
- * hand-rolled request body fails server validation. Reading the CLI-maintained cache keeps
- * this read-only, account-scoped, and honest about freshness: the file's `fetched_at_secs`
- * travels with the quota, and a stale cache degrades to "no data" rather than a fabricated
- * number. Running any authenticated `devin` command refreshes it.
- *
- * Field numbers below are read off the live wire (devin 3000.10.21, 2026-09-11) with a generic
- * decoder, cross-checked against the schema strings in the CLI binary:
- *   user_status(field 1) → plan_status(field 13):
- *     field 2.1 = daily_quota_reset_at_unix, field 3.1 = weekly_quota_reset_at_unix,
- *     field 14 = daily_quota_remaining_percent, field 15 = weekly_quota_remaining_percent
- *   plan_status → field 1 (plan/user info) → field 2 = plan name ("Pro"/"Max"/...)
- */
-
-/** The cache lives under the CLI's state dir; XDG_CACHE_HOME wins when set (also the test seam),
- * otherwise the platform default (macOS ~/Library/Caches-style ~/​.cache, Windows %LOCALAPPDATA%). */
-function devinCacheDir(): string | null {
-  const xdg = process.env.XDG_CACHE_HOME;
-  if (xdg) return join(xdg, "devin", "cli");
-  const platform = process.platform;
-  if (platform === "win32") {
-    const local = process.env.LOCALAPPDATA;
-    return local ? join(local, "devin", "cli") : null;
-  }
-  if (platform === "darwin") return join(homedir(), ".cache", "devin", "cli");
-  return join(homedir(), ".cache", "devin", "cli");
-}
-
-interface DevineCacheEnvelope {
-  fetched_at_secs?: number;
-  payload?: string;
-}
-
-function readLatestUserStatusCache(): { payload: Buffer; fetchedAtMs: number } | null {
-  const dir = devinCacheDir();
-  if (!dir || !existsSync(dir)) return null;
-  let files: string[];
-  try {
-    files = readdirSync(dir).filter(f => /^user_status\..+\.bin$/.test(f));
-  } catch {
-    return null;
-  }
-  // Newest wins: an account switch changes the identity digest, so multiple caches can coexist.
-  let newest: { file: string; mtime: number } | null = null;
-  for (const file of files) {
-    try {
-      // readdir order is not recency; stat each candidate.
-      const mtime = statSync(join(dir, file)).mtimeMs;
-      if (!newest || mtime > newest.mtime) newest = { file, mtime };
-    } catch {
-      continue;
-    }
-  }
-  if (!newest) return null;
-  try {
-    const envelope = JSON.parse(readFileSync(join(dir, newest.file), "utf8")) as DevineCacheEnvelope;
-    if (typeof envelope.payload !== "string" || envelope.payload.length === 0) return null;
-    return {
-      payload: Buffer.from(envelope.payload, "base64"),
-      fetchedAtMs: (typeof envelope.fetched_at_secs === "number" ? envelope.fetched_at_secs : 0) * 1000,
-    };
-  } catch {
-    return null;
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Minimal protobuf reader: only what the fold-out below needs.
@@ -269,20 +178,6 @@ export async function fetchDevinQuotaLive(
     // rather than surfacing an error for a dashboard adornment.
     return null;
   }
-}
-
-/**
- * Build the dashboard quota from the CLI cache. `remaining` is inverted into the used-percentage
- * convention every other window on `ProviderQuota` speaks, so the dashboard bars read like the
- * rest: high = draining, not high = healthy.
- */
-export function fetchDevinUsageSnapshot(): ProviderQuota | null {
-  const cache = readLatestUserStatusCache();
-  if (!cache || cache.payload.length === 0) return null;
-  const snapshot = parseDevinUserStatus(cache.payload);
-  if (!snapshot) return null;
-
-  return buildQuotaFromSnapshot(snapshot, cache.fetchedAtMs || Date.now());
 }
 
 /** Shared shaping so both readers produce identical windows for identical data. */

@@ -35,7 +35,6 @@ const WIRE_MODELS: Record<AdapterWire, string> = {
   "openai-responses": "deepseek-v4-flash",
   cursor: "cursor/auto",
   codebuddy: "glm-5.3",
-  devin: "swe-1.7",
   "devin-http": "swe-2",
 };
 
@@ -50,7 +49,6 @@ function providerFixture(adapterId: string, wire: AdapterWire): OcxProviderConfi
     "openai-responses": "https://api.deepseek.com",
     cursor: "https://api2.cursor.sh",
     codebuddy: "https://www.codebuddy.ai",
-    devin: "https://cli.devin.ai",
     "devin-http": "https://server.codeium.com",
   };
   // Semantic wrappers with provider-specific URL shapes must override the wire-family default here.
@@ -447,9 +445,9 @@ describe("registry-derived routed tool conformance", () => {
     }
   });
 
-  // CLI-carried adapters (qoder/codebuddy stream-json, devin ACP) have no HTTP wire driver:
+  // CLI-carried adapters (qoder/codebuddy stream-json) have no HTTP wire driver:
   // the vendor process owns the transport, so these conformance suites skip them.
-  const TOOL_LESS_ADAPTERS = new Set(["codebuddy", "qoder", "devin"]);
+  const TOOL_LESS_ADAPTERS = new Set(["codebuddy", "qoder"]);
 
   test("every registered adapter keeps the nested apply_patch helper in its final request", async () => {
     for (const [adapterId] of adapterDefinitions()) {

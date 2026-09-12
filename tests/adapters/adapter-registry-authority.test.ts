@@ -23,7 +23,6 @@ const EXPECTED_ADAPTER_NAMES = {
   cursor: "cursor",
   "mimo-free": "mimo-free",
   qoder: "qoder",
-  devin: "devin",
   "devin-http": "devin-http",
 } as const;
 

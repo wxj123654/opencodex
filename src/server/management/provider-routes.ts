@@ -40,7 +40,6 @@ import { providerDestinationResolvedError } from "../../lib/destination-policy";
 import { reconcileLiveStateStores } from "../../lib/state-store-registrations";
 import { ProviderOutboundPolicyError, providerOutboundGet, providerOutboundPost, providerRedirectError } from "../../lib/provider-outbound";
 import { fetchCursorUsableModels } from "../../adapters/cursor/live-models";
-import { fetchDevinModels } from "../../adapters/devin/models";
 import { fetchDevinHttpModelsLive } from "../../adapters/devin-http/discovery";
 import { fetchQoderModels } from "../../adapters/qoder/live-models";
 import { resolveQoderProfile } from "../../adapters/qoder/profiles";
@@ -1388,24 +1387,6 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
           ok: false,
           latencyMs,
           error: `devin-http discovery ${live.error}${live.detail ? `: ${live.detail}` : ""}`,
-        });
-      }
-      return jsonResponse({
-        ok: true,
-        latencyMs,
-        models: live.models.length,
-        message: `Connected. ${live.models.length} models.`,
-      });
-    }
-    if (prov.adapter === "devin") {
-      const started = Date.now();
-      const live = await fetchDevinModels();
-      const latencyMs = Date.now() - started;
-      if (!live.ok) {
-        return jsonResponse({
-          ok: false,
-          latencyMs,
-          error: `devin discovery ${live.error}${live.detail ? `: ${live.detail}` : ""}`,
         });
       }
       return jsonResponse({
