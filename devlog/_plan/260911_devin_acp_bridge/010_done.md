@@ -93,3 +93,22 @@ or the model misreports); ACP `session/new` carries no `models` roster on
 this version, so per-turn `session/set_model` is currently skipped when the
 field is absent and the roster only feeds discovery — acceptable, but worth
 re-checking on CLI upgrades.
+
+## Account quota (2026-09-12)
+
+The dashboard quota row now reads the Devin CLI's own cache. Discovery path:
+`devin` exposes no account-balance subcommand; the seat-management
+`GetUserStatus` RPC (`server.codeium.com/exa.seat_management_pb.SeatManagementService/GetUserStatus`)
+carries `plan_status.daily/weekly_quota_remaining_percent` plus reset
+timestamps (confirmed by decoding the live response, captured by pointing
+`api_server_url` at a local passthrough). The CLI does NOT make that RPC
+replayable from outside: its Authorization header is an encrypted transform
+of the stored key and the request body carries a server-validated per-call
+nonce, so opencodex does not probe on its own.
+
+Instead `devin-usage.ts` reads the CLI-maintained cache
+(`~/.cache/devin/cli/user_status.<digest>.bin` = JSON envelope, base64
+GetUserStatusResponse), inverts remaining-percent into the dashboard's
+used-percent convention, and reports `fetched_at_secs` as updatedAt. Any
+authenticated `devin` command refreshes the cache; an absent or corrupt one
+resolves to no row, never a fabricated number.

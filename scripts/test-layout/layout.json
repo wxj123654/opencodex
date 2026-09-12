@@ -611,6 +611,7 @@
     "desktop-remote-store.test.ts": "clients",
     "devin-adapter.test.ts": "providers",
     "devin-provider.test.ts": "providers",
+    "devin-usage.test.ts": "providers",
     "destination-policy-resolved.test.ts": "routing",
     "digitalocean-scaleway-provider.test.ts": "providers",
     "docs-429-failover-claims.test.ts": "ci-workflows",

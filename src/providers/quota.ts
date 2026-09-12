@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { fetchDevinUsageSnapshot as fetchDevinQuota } from "./devin-usage";
 import {
   effectiveCodexAuthAccountId,
   fetchMainAccountInfoSnapshot,
@@ -3064,6 +3065,15 @@ function keyQuotaReaderForProvider(name: string, provider: OcxProviderConfig): K
   if (name === "deepseek" && isCanonicalDeepSeekBaseUrl(provider.baseUrl)) return fetchDeepSeekQuota;
   if (name === "cline-pass" && isCanonicalClineBaseUrl(provider.baseUrl)) return fetchClineQuota;
   if (isCanonicalOllamaCloudBaseUrl(provider.baseUrl ?? getProviderRegistryEntry(name)?.baseUrl)) return fetchOllamaCloudQuota;
+  // Devin CLI bridge: quota comes from the CLI's own GetUserStatus cache (read-only, no probe
+  // of our own — the CLI layers an encrypted credential transform we do not reproduce).
+  if (provider.adapter === "devin") {
+    return async (id) => {
+      const quota = fetchDevinQuota();
+      if (!quota) return null;
+      return { provider: id, label: "Devin CLI cache", source: "cli-cache", quota, updatedAt: quota.updatedAt };
+    };
+  }
   if (["zai", "glm", "glm-cn", "zhipu-bigmodel-coding"].includes(name) && isCanonicalZaiBaseUrl(provider.baseUrl)) return fetchZaiQuota;
   if (["minimax", "minimax-cn"].includes(name) && isCanonicalMinimaxBaseUrl(provider.baseUrl)) return fetchMinimaxQuota;
   if (name === "moonshot" && isCanonicalMoonshotBaseUrl(provider.baseUrl)) return fetchMoonshotQuota;
