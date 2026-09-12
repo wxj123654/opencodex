@@ -639,9 +639,13 @@ export async function runDevinHttpTurn(
 }
 
 function toOcxUsage(usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }) {
-  const total = usage.inputTokens + usage.outputTokens;
+  // Devin reports inputTokens EXCLUSIVE of cache read/write, the same convention Anthropic
+  // uses. Normalize to the canonical inclusive convention (types.ts OcxUsage / devlog 070):
+  // downstream accounting and the Logs page both read inputTokens as the full prompt size.
+  const inputTokens = usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
+  const total = inputTokens + usage.outputTokens;
   return {
-    inputTokens: usage.inputTokens,
+    inputTokens,
     outputTokens: usage.outputTokens,
     totalTokens: total,
     // Both spellings are set because different accounting paths read different ones, matching the

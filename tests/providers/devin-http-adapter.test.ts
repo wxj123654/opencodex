@@ -540,8 +540,10 @@ describe("devin-http turn event mapping", () => {
       chatResponseFrame(e => e.message(7, sub => { sub.uint64(2, 136n); sub.uint64(3, 58n); sub.uint64(5, 256n); })),
     ]);
     const done = events.at(-1) as Extract<AdapterEvent, { type: "done" }>;
+    // inputTokens is normalized to the canonical inclusive convention: 136 uncached + 256
+    // cache read = 392 total prompt tokens (devlog 070).
     expect(done.usage).toMatchObject({
-      inputTokens: 136,
+      inputTokens: 392,
       outputTokens: 58,
       cachedInputTokens: 256,
       cacheReadInputTokens: 256,
