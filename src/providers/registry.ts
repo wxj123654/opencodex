@@ -36,7 +36,7 @@ import {
   CODEBUDDY_REASONING_EFFORTS,
 } from "./codebuddy-models";
 import { QODER_CN_MODELS, QODER_GLOBAL_MODELS, QODER_REASONING_EFFORTS } from "./qoder-models";
-import { DEVIN_API_MODELS, DEVIN_API_MODEL_CONTEXT_WINDOWS, DEVIN_CLI_MODELS, DEVIN_CLI_MODEL_CONTEXT_WINDOWS } from "./devin-models";
+import { DEVIN_API_MODELS, DEVIN_API_MODEL_CONTEXT_WINDOWS, DEVIN_CLI_MODEL_CONTEXT_WINDOWS, DEVIN_CLI_MODEL_DEFAULT_REASONING_EFFORTS, DEVIN_CLI_MODEL_REASONING_EFFORTS, DEVIN_CLI_MODELS } from "./devin-models";
 
 export type ProviderAuthKind = "forward" | "oauth" | "key" | "local";
 export type MetadataModelIdNormalize = "case-insensitive";
@@ -3481,11 +3481,15 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     apiKeyValidation: "unknown",
     preserveCustomDestination: true,
     dashboardUrl: "https://app.devin.ai",
-    defaultModel: "swe-2-medium",
+    defaultModel: "swe-2",
     models: [...DEVIN_CLI_MODELS],
     liveModels: true,
     modelContextWindows: DEVIN_CLI_MODEL_CONTEXT_WINDOWS,
-    note: "Bridges the official Devin CLI (`devin acp`, Agent Client Protocol over stdio) as a text/reasoning channel. Requires the CLI: `curl -fsSL https://cli.devin.ai/install.sh | bash`, then `devin auth login` (Free plan eligible); a DEVIN_API_KEY-compatible provider key is optional. The agent keeps its own tools and ignores Codex's tool list; permission requests are always declined and sessions are locked to the read-only ask mode. Model roster is account-specific via `devin models list --format json` (ids verified live: swe-2-medium is the newest Cognition family); the static seed is a fallback. Not an OpenAI-compatible endpoint — see `devin-api` for the per-token catalog.",
+    // Reasoning variants are effort SUFFIXES on the Devin wire (swe-2-medium), folded into
+    // ladders here and re-attached by the adapter at session/set_model time.
+    modelReasoningEfforts: DEVIN_CLI_MODEL_REASONING_EFFORTS,
+    modelDefaultReasoningEfforts: DEVIN_CLI_MODEL_DEFAULT_REASONING_EFFORTS,
+    note: "Bridges the official Devin CLI (`devin acp`, Agent Client Protocol over stdio) as a text/reasoning channel. Requires the CLI: `curl -fsSL https://cli.devin.ai/install.sh | bash`, then `devin auth login` (Free plan eligible); a DEVIN_API_KEY-compatible provider key is optional. The agent keeps its own tools and ignores Codex's tool list; permission requests are always declined and sessions are locked to the read-only ask mode. Reasoning variants (swe-2-medium/high/max) surface as effort ladders on the base id. Model roster is account-specific via `devin models list --format json`; the static seed is a fallback. Not an OpenAI-compatible endpoint — see `devin-api` for the per-token catalog.",
   },
 ];
 

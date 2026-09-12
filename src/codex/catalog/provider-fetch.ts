@@ -1722,10 +1722,13 @@ async function fetchProviderModelsWithAuth(
     }
     const live = await fetchDevinModels();
     if (live.ok) {
-      const discovered = live.models.map(id => ({
-        id,
+      // Variant suffixes were folded into effort ladders by the parser; seed-external bases
+      // keep the live ladder, seed-internal ones get the maintainer-calibrated registry hints.
+      const discovered = live.models.map(model => ({
+        id: model.id,
         provider: name,
-        ...catalogHintsFromProviderConfig(name, prov, id, contextCap, metadataModelIdCaseFold, captured.effectiveAlias),
+        ...(model.efforts.length > 0 ? { reasoningEfforts: model.efforts } : {}),
+        ...catalogHintsFromProviderConfig(name, prov, model.id, contextCap, metadataModelIdCaseFold, captured.effectiveAlias),
       }));
       const forCache = withConfiguredRetention(discovered, { retainComboTargets: false });
       if (!setCached(name, forCache, Date.now(), cacheGeneration)) {

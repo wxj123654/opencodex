@@ -211,15 +211,26 @@ export async function runDevinAcpTurn(
     }
 
     // 3. Model selection ONLY among agent-advertised ids: a routed id the agent did not advertise
-    // fails closed rather than being sent on the wire as an invented value.
+    // fails closed rather than being sent on the wire as an invented value. Reasoning variants
+    // are effort SUFFIXES on the wire (swe-2 + medium → swe-2-medium): discovery folds them into
+    // effort ladders, so here the routed base id + caller effort is re-attached. An EXPLICIT
+    // effort resolves to exactly one candidate and fails closed if unadvertised (never a silent
+    // remap to another rung); without an effort the bare id wins, else the -medium default rung
+    // (Devin's own default for families that ship no bare id, e.g. swe-2).
     const availableModels: AcpModelInfo[] = newSession?.models?.availableModels ?? [];
     if (availableModels.length > 0) {
-      const wanted = parsed.modelId;
-      const match = availableModels.some(model => model.modelId === wanted);
-      if (!match) {
+      const advertised = new Set(availableModels.map(model => model.modelId));
+      const effort = typeof parsed.options.reasoning === "string" && parsed.options.reasoning.length > 0
+        ? parsed.options.reasoning
+        : undefined;
+      const candidates = effort
+        ? [`${parsed.modelId}-${effort}`]
+        : [parsed.modelId, `${parsed.modelId}-medium`];
+      const resolved = candidates.find(candidate => advertised.has(candidate));
+      if (!resolved) {
         emitOnce({
           type: "error",
-          message: `Model "${wanted}" is not advertised by this Devin account over ACP. Run \`devin models list\` for the roster and pick an exact modelId.`,
+          message: `Model "${parsed.modelId}"${effort ? ` at effort "${effort}"` : ""} is not advertised by this Devin account over ACP. Run \`devin models list\` for the roster and pick an exact modelId.`,
           status: 400,
           errorType: "invalid_request_error",
           code: "model_not_advertised",
@@ -227,7 +238,7 @@ export async function runDevinAcpTurn(
         });
         return;
       }
-      await connection.request("session/set_model", (buildSetModelRequest(3, sessionId, wanted).params ?? {}) as Record<string, unknown>, REQUEST_TIMEOUT_MS);
+      await connection.request("session/set_model", (buildSetModelRequest(3, sessionId, resolved).params ?? {}) as Record<string, unknown>, REQUEST_TIMEOUT_MS);
     }
 
     // 4. Prompt. Turn-scoped timeout is enforced by the outer wall clock; the request-level

@@ -131,9 +131,9 @@ describe("devin fail-closed refusal shapes", () => {
 
 describe("devin models list parsing", () => {
   test("accepts a bare array, {models}, or {data} with id or modelId fields", () => {
-    expect(parseDevinModelList(JSON.stringify(["swe-1.7", "swe-1.6"]))).toEqual({ ok: true, models: ["swe-1.7", "swe-1.6"] });
-    expect(parseDevinModelList(JSON.stringify({ models: [{ id: "swe-1.7", name: "SWE-1.7" }] }))).toEqual({ ok: true, models: ["swe-1.7"] });
-    expect(parseDevinModelList(JSON.stringify({ data: [{ modelId: "swe-1.7" }] }))).toEqual({ ok: true, models: ["swe-1.7"] });
+    expect(parseDevinModelList(JSON.stringify(["swe-1.7", "swe-1.6"]))).toEqual({ ok: true, models: [{ id: "swe-1.7", efforts: [] }, { id: "swe-1.6", efforts: [] }] });
+    expect(parseDevinModelList(JSON.stringify({ models: [{ id: "swe-1.7", name: "SWE-1.7" }] }))).toEqual({ ok: true, models: [{ id: "swe-1.7", efforts: [] }] });
+    expect(parseDevinModelList(JSON.stringify({ data: [{ modelId: "swe-1.7" }] }))).toEqual({ ok: true, models: [{ id: "swe-1.7", efforts: [] }] });
   });
 
   test("rejects non-JSON, non-array shapes, and empty rosters", () => {
@@ -142,10 +142,62 @@ describe("devin models list parsing", () => {
     expect(parseDevinModelList(JSON.stringify([]))).toMatchObject({ ok: false, error: "empty" });
   });
 
+  test("folds the live families roster: SWE only, variant suffixes become effort ladders", () => {
+    const roster = JSON.stringify({
+      families: [
+        {
+          slug: "swe-2",
+          variants: [
+            { model_uid: "swe-2-medium", max_context_tokens: 262000 },
+            { model_uid: "swe-2-high", max_context_tokens: 262000 },
+            { model_uid: "swe-2-max", max_context_tokens: 262000 },
+          ],
+        },
+        {
+          slug: "swe-1-7",
+          variants: [{ model_uid: "swe-1-7" }, { model_uid: "swe-1-7-medium" }],
+        },
+        {
+          slug: "claude-opus-5",
+          variants: [{ model_uid: "claude-opus-5-high" }],
+        },
+        {
+          slug: "fusion",
+          variants: [{ model_uid: "fusion-gpt-5-6-sol-high-sidekick-swe-2-medium" }],
+        },
+      ],
+    });
+    const result = parseDevinModelList(roster);
+    expect(result).toEqual({
+      ok: true,
+      models: [
+        { id: "swe-2", efforts: ["medium", "high", "max"] },
+        { id: "swe-1-7", efforts: ["medium"] },
+      ],
+    });
+  });
+
+  test("lightning keeps its own base id; fast is not folded as an effort", () => {
+    const roster = JSON.stringify({
+      families: [
+        { slug: "swe-1-7-lightning", variants: [{ model_uid: "swe-1-7-lightning" }, { model_uid: "swe-1-7-lightning-medium" }] },
+        { slug: "swe-1-6", variants: [{ model_uid: "swe-1-6" }, { model_uid: "swe-1-6-fast" }] },
+      ],
+    });
+    expect(parseDevinModelList(roster)).toEqual({
+      ok: true,
+      models: [
+        { id: "swe-1-7-lightning", efforts: ["medium"] },
+        { id: "swe-1-6", efforts: [] },
+        { id: "swe-1-6-fast", efforts: [] },
+      ],
+    });
+  });
+
   test("the test seam replaces the roster fetch entirely", async () => {
-    setFetchDevinModelsForTests(() => ({ ok: true, models: ["account-model"] }));
+    setFetchDevinModelsForTests(() => ({ ok: true, models: [{ id: "account-model", efforts: [] }] }));
     const { fetchDevinModels } = await import("../../src/adapters/devin/models");
-    expect(await fetchDevinModels()).toEqual({ ok: true, models: ["account-model"] });
+    expect(await fetchDevinModels()).toEqual({ ok: true, models: [{ id: "account-model", efforts: [] }] });
     setFetchDevinModelsForTests(null);
   });
 });
@@ -215,6 +267,7 @@ function scriptedAgent(options: {
   stopReason?: string;
   sessionError?: { code: number; message: string };
   setModeCalls?: string[];
+  setModelIds?: string[];
 } = {}): (spawnArgs: { file: string; args: readonly string[] }) => FakeChild {
   return ({ args }) => {
     expect(args[0]).toBe("acp");
@@ -257,7 +310,7 @@ function scriptedAgent(options: {
         return;
       }
       if (message.method === "session/set_model") {
-        expect((message.params as { modelId: string }).modelId).toBe("swe-1.7");
+        options.setModelIds?.push((message.params as { modelId: string }).modelId);
         send({ jsonrpc: "2.0", id: message.id, result: {} });
         return;
       }
@@ -359,6 +412,33 @@ describe("devin ACP turn orchestration", () => {
   test("a session that advertises no modes at all still completes (older agents)", async () => {
     const events = await runTurn(scriptedAgent({ modes: null }));
     expect(events.at(-1)).toMatchObject({ type: "done" });
+  });
+
+  test("a caller reasoning effort re-attaches the variant suffix at set_model", async () => {
+    const setModelIds: string[] = [];
+    const events = await runTurn(scriptedAgent({
+      models: [{ modelId: "swe-2-medium" }, { modelId: "swe-2-high" }, { modelId: "swe-2-max" }],
+      setModelIds,
+    }), parsed({ modelId: "swe-2", options: { reasoning: "high" } }));
+    expect(events.at(-1)).toMatchObject({ type: "done" });
+    expect(setModelIds).toEqual(["swe-2-high"]);
+  });
+
+  test("a base id without a bare advertised uid falls back to the -medium default rung", async () => {
+    const setModelIds: string[] = [];
+    const events = await runTurn(scriptedAgent({
+      models: [{ modelId: "swe-2-medium" }, { modelId: "swe-2-high" }, { modelId: "swe-2-max" }],
+      setModelIds,
+    }), parsed({ modelId: "swe-2" }));
+    expect(events.at(-1)).toMatchObject({ type: "done" });
+    expect(setModelIds).toEqual(["swe-2-medium"]);
+  });
+
+  test("an unadvertised effort rung fails closed (no silent remap to another rung)", async () => {
+    const events = await runTurn(scriptedAgent({
+      models: [{ modelId: "swe-2-medium" }, { modelId: "swe-2-high" }],
+    }), parsed({ modelId: "swe-2", options: { reasoning: "max" } }));
+    expect(events.at(-1)).toMatchObject({ type: "error", code: "model_not_advertised" });
   });
 
   test("a routed model the agent does not advertise fails closed with model_not_advertised", async () => {

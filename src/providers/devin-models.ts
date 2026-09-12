@@ -1,11 +1,13 @@
 /**
  * Static seeds for the two Devin provider entries.
  *
- * - DEVIN_CLI_MODELS serves the `devin` ACP CLI bridge. Ids are the REAL `model_uid` values from
- *   `devin models list --format json` (verified against devin 3000.10.21 on 2026-09-11, logged in
- *   with a Free-plan account): the CLI uses HYPHENATED ids (`swe-1-7`, `swe-2-medium`), NOT the
- *   dotted LiteLLM spellings. Live roster discovery is authoritative; this list is only the
- *   degraded fallback, and unadvertised ids fail closed at session/set_model.
+ * - DEVIN_CLI_MODELS serves the `devin` ACP CLI bridge. Ids are the REAL base `model_uid` values
+ *   from `devin models list --format json` (verified against devin 3000.10.21 on 2026-09-11,
+ *   logged in with a Free-plan account): the CLI uses HYPHENATED ids (`swe-1-7`), NOT the dotted
+ *   LiteLLM spellings. Reasoning variants are effort SUFFIXES on the wire (swe-2-medium);
+ *   discovery folds them into per-model effort ladders and the adapter re-attaches the suffix at
+ *   session/set_model, so the seed lists BASE ids plus the folded ladders. Live roster discovery
+ *   is authoritative; this list is only the degraded fallback, and unadvertised ids fail closed.
  * - DEVIN_API_MODELS serves the `devin-api` OpenAI-compatible catalog (api.cognition.ai/v1). Ids
  *   follow LiteLLM's first-class `cognition/` provider integration (cost map entries
  *   `cognition/swe-1.7`, `cognition/swe-1.7-lightning`, `cognition/swe-1.6`, added in
@@ -17,13 +19,25 @@
  */
 
 export const DEVIN_CLI_MODELS = [
-  "swe-2-medium",
-  "swe-2-high",
-  "swe-2-max",
+  "swe-2",
   "swe-1-7",
   "swe-1-7-lightning",
   "swe-1-6",
 ] as const;
+
+/** Reasoning-effort ladders folded out of the live variant suffixes (swe-2-medium/high/max etc.).
+ * The adapter re-attaches the suffix at session/set_model time; a bare id (swe-1-7, swe-1-6)
+ * means the bare uid is itself routable and needs no suffix. */
+export const DEVIN_CLI_MODEL_REASONING_EFFORTS: Record<string, string[]> = {
+  "swe-2": ["medium", "high", "max"],
+  "swe-1-7": ["medium"],
+  "swe-1-7-lightning": ["medium"],
+};
+
+/** Devin's own default rung for families that ship no bare uid (swe-2 has only suffixed variants). */
+export const DEVIN_CLI_MODEL_DEFAULT_REASONING_EFFORTS: Record<string, string> = {
+  "swe-2": "medium",
+};
 
 export const DEVIN_API_MODELS = [
   "swe-1.7",
@@ -37,15 +51,10 @@ export const DEVIN_API_MODELS = [
  * SWE-2 is Cognition's newest in-house family (swe-2-medium/high/max).
  */
 export const DEVIN_CLI_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
-  "swe-2-medium": 262_000,
-  "swe-2-high": 262_000,
-  "swe-2-max": 262_000,
+  "swe-2": 262_000,
   "swe-1-7": 262_000,
-  "swe-1-7-medium": 262_000,
   "swe-1-7-lightning": 202_752,
-  "swe-1-7-lightning-medium": 202_752,
   "swe-1-6": 200_000,
-  "swe-1-6-fast": 200_000,
 };
 
 /**
