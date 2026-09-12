@@ -739,20 +739,40 @@ OpenCodex provides official adapter support for Qoder through the `qoder` (Globa
 
 ### Devin (Cognition) SWE models
 
-Devin's models are reachable through two distinct surfaces, and OpenCodex ships both under
+Devin's models are reachable through three distinct surfaces, and OpenCodex ships all three under
 separate provider ids:
 
 - **`devin` — the official Devin CLI bridge (self-serve).** Runs `devin acp` (the Agent Client
   Protocol JSON-RPC stdio agent) as a child process and streams its output as the model response.
-  `devin auth login` works on the **Free** plan, so this is the only path a self-serve user can
+  `devin auth login` works on the **Free** plan, so this is the first path a self-serve user can
   actually use.
+- **`devin-http` — direct Cascade access (self-serve, recommended for breadth).** Calls the same
+  backend the CLI uses over connectrpc, with no child process. It reuses the credential the CLI
+  already stored, exposes the account's full model roster, and is a real model contract: Codex's
+  tools reach the model and its tool calls come back for Codex to execute. It has no read-only
+  containment, because there is no local agent to contain.
 - **`devin-api` — the per-token OpenAI-compatible catalog.** `https://api.cognition.ai/v1` serves
   the in-house SWE model family (`swe-1.7`, `swe-1.7-lightning` on Cerebras, `swe-1.6`) over
   ordinary `/chat/completions` with function calling and prompt caching. Keys are `cog_` service
   user keys, which require a **Teams ($80/mo) or Enterprise** plan.
 
-The autonomous session API at `api.devin.ai` (ACU-billed cloud Devin sessions) is a third surface
-with no chat-completions shape and is deliberately not bridged by either entry.
+The autonomous session API at `api.devin.ai` (ACU-billed cloud Devin sessions) is a fourth surface
+with no chat-completions shape and is deliberately not bridged by any entry.
+
+#### Choosing between `devin` and `devin-http`
+
+Both are self-serve and both use the same login. They make opposite trade-offs:
+
+| | `devin` (ACP) | `devin-http` |
+| --- | --- | --- |
+| Transport | `devin acp` child process | one connectrpc request |
+| Tool calling | the CLI's own tools; Codex's tool list is ignored | full model contract, Codex runs the calls |
+| Model roster | the SWE families the CLI advertises | every family the account can call |
+| Read-only containment | yes — no fs/terminal, every permission declined, sessions locked to `ask` | not applicable: only a model, nothing to contain |
+| Requires the CLI installed | yes | no (the credential file is enough) |
+
+Use `devin` when the requirement is "Devin must not be able to act on this machine". Use
+`devin-http` when the requirement is "use this subscription's models, with tools".
 
 #### Devin CLI (ACP) — self-serve
 
@@ -785,6 +805,42 @@ with no chat-completions shape and is deliberately not bridged by either entry.
   fails closed with `model_not_advertised`.
 - **Billing:** draws the logged-in Devin account's included quota / credits (see `/usage` in the
   CLI), same as interactive CLI use.
+
+#### Devin HTTP — direct Cascade (self-serve)
+
+```json
+{
+  "providers": {
+    "devin-http": {
+      "adapter": "devin-http",
+      "authMode": "key",
+      "baseUrl": "https://server.codeium.com"
+    }
+  }
+}
+```
+
+- **Prerequisites:** a Devin login. `devin auth login` is enough — the adapter reads
+  `~/.local/share/devin/credentials.toml` directly, so the CLI does not need to be installed or on
+  `PATH` for this provider. An explicit `apiKey` in the provider config wins over the stored
+  credential, which is the multi-account path.
+- **Contract:** a real model contract. Codex's tool list is sent to the model and the model's
+  tool calls are returned for Codex to execute, with `tool_choice: none` removing the callable
+  surface entirely.
+- **Model roster:** entitlement-aware, from Cascade's own `GetCliModelConfigs`. Reasoning efforts
+  are folded into per-model ladders (`claude-opus-5` offers `medium`/`low`/`high`/`xhigh`/`max`),
+  and serving-tier variants (`-fast`, `-priority`) and context/thinking variants (`-1m`,
+  `-thinking`) stay separate ids because they are different uids upstream.
+- **Known limitation:** a few of the newest families (`gpt-5-6-sol`, `gpt-5-6-luna`,
+  `gpt-5-6-terra`, `gpt-6-astra`, and their `-priority` tiers) are **Local-only**: the cloud API
+  answers `This model is only in Devin Local` and only the CLI's local runtime can serve them. They
+  remain in the roster because Cascade publishes no field that distinguishes them, and the property
+  can differ per plan; select a different family if you hit that error.
+- **Billing:** the same included quota as interactive CLI use. The dashboard reads it live from the
+  seat-management endpoint.
+- **Wire stability:** this is a private, undocumented API. Field numbers were read off the live
+  service, and a server-side change surfaces as a decode or request error rather than a clean
+  version message.
 
 #### Devin API — per-token catalog (Teams/Enterprise)
 

@@ -53,6 +53,7 @@ import { filterCursorConfiguredModelsByLiveDiscovery } from "../../adapters/curs
 import { fetchCursorUsableModels } from "../../adapters/cursor/live-models";
 import { recordLiveCursorClaudeModels, recordLiveCursorMaxModeModels } from "../../adapters/cursor/catalog";
 import { fetchDevinModels } from "../../adapters/devin/models";
+import { fetchDevinHttpModelsLive } from "../../adapters/devin-http/discovery";
 import { fetchQoderModels } from "../../adapters/qoder/live-models";
 import { resolveQoderProfile } from "../../adapters/qoder/profiles";
 import { isCanonicalOpenAiForwardProvider, OPENAI_API_PROVIDER_ID, OPENAI_CODEX_PROVIDER_ID } from "../../providers/openai-tiers";
@@ -1698,6 +1699,61 @@ async function fetchProviderModelsWithAuth(
     const stale = getStaleCached(name, authorityIdentity);
     return observed(withConfiguredRetention(
       stale ? applyConfigHintsToCachedModels(name, prov, stale, contextCap, metadataModelIdCaseFold, captured.effectiveAlias) : configured,
+    ), "degraded");
+  }
+  if (prov.adapter === "devin-http") {
+    // Direct Cascade HTTP: the roster comes from `GetCliModelConfigs`, which is entitlement-aware
+    // and needs the same session token the chat path uses. Unlike the ACP entry there is no CLI
+    // child process to consult, so discovery is a plain authenticated fetch. Fresh/stale/seed
+    // degradation matches cursor, because the credential — not a per-key authority record — is the
+    // authority for which models this account can call.
+    const cachedDevinHttp = getFreshCached(name, ttlMs);
+    if (cachedDevinHttp) {
+      return observed(
+        withConfiguredRetention(applyConfigHintsToCachedModels(name, prov, cachedDevinHttp, contextCap, metadataModelIdCaseFold, captured.effectiveAlias)),
+        "authoritative",
+      );
+    }
+    if (!apiKey) {
+      // No credential means no roster. Degrade to the seed rather than probing, so a missing key
+      // shows the static catalog instead of an error for a provider the user may not even use.
+      const staleNoAuth = getStaleCached(name);
+      return observed(withConfiguredRetention(
+        staleNoAuth ? applyConfigHintsToCachedModels(name, prov, staleNoAuth, contextCap, metadataModelIdCaseFold, captured.effectiveAlias) : configured,
+      ), "degraded");
+    }
+    if (isModelsFetchCoolingDown(name)) {
+      const cooling = getStaleCached(name);
+      return observed(withConfiguredRetention(
+        cooling ? applyConfigHintsToCachedModels(name, prov, cooling, contextCap, metadataModelIdCaseFold, captured.effectiveAlias) : configured,
+      ), "degraded");
+    }
+    const liveHttp = await fetchDevinHttpModelsLive(apiKey);
+    if (liveHttp.ok) {
+      // The roster fold is authoritative for the ladder AND for the exact wire uid per rung; a
+      // base-internal id gets the maintainer-calibrated registry hints on top.
+      const discovered = liveHttp.models.map(model => ({
+        id: model.id,
+        provider: name,
+        ...(model.efforts.length > 0 ? { reasoningEfforts: model.efforts } : {}),
+        ...(model.contextWindow > 0 ? { contextWindow: model.contextWindow } : {}),
+        ...catalogHintsFromProviderConfig(name, prov, model.id, contextCap, metadataModelIdCaseFold, captured.effectiveAlias),
+      }));
+      const forCache = withConfiguredRetention(discovered, { retainComboTargets: false });
+      if (!setCached(name, forCache, Date.now(), cacheGeneration)) {
+        return observed(withConfiguredRetention(configured), "degraded");
+      }
+      markProviderDiscoveryOk(name, liveHttp.models.length);
+      return observed(withConfiguredRetention(forCache, { warnDrops: true }), "authoritative");
+    }
+    if (isCurrentCacheGeneration()) {
+      markModelsFetchFailure(name);
+      markProviderDiscoveryFailed(name, { reason: "provider" });
+      console.warn(`[opencodex] Devin HTTP model discovery for "${name}" failed [${liveHttp.error}]${liveHttp.detail ? `: ${liveHttp.detail}` : ""}; using stale/static catalog degradation.`);
+    }
+    const staleHttp = getStaleCached(name);
+    return observed(withConfiguredRetention(
+      staleHttp ? applyConfigHintsToCachedModels(name, prov, staleHttp, contextCap, metadataModelIdCaseFold, captured.effectiveAlias) : configured,
     ), "degraded");
   }
   if (prov.adapter === "devin") {

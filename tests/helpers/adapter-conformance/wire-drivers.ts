@@ -1,4 +1,5 @@
 import { create, fromBinary } from "@bufbuild/protobuf";
+import { projectDevinPrompts, resolveWireUid, toDevinToolChoiceForConformance, toDevinToolDefinitions } from "../../../src/adapters/devin-http/turn";
 import type { ProviderAdapter } from "../../../src/adapters/base";
 import type { AdapterWire } from "../../../src/adapters/registry";
 import { decodeCursorArgsMap } from "../../../src/adapters/cursor/arg-codec";
@@ -325,6 +326,38 @@ export const TOOL_WIRE_DRIVERS = {
     // bridge (sdk_mcp / can_use_tool) lands.
     async observeOutbound(): Promise<string> {
       throw new Error("codebuddy forwards no client tool catalog in v1; excluded from tool conformance");
+    },
+  },
+  "devin-http": {
+    // Devin/Cascade speaks connectrpc: the outbound body is a gzip-compressed protobuf frame, not
+    // JSON. This driver reports the tool catalog the adapter actually serializes, re-exposed as
+    // JSON so the shared conformance helpers can read it uniformly.
+    //
+    // No `extractWireToolName` / `streamingToolCall`: the adapter owns a `runTurn` stream and its
+    // `parseStream` is deliberately disabled, so this harness cannot feed it a Response. The stream
+    // mapping is covered by tests/providers/devin-http-adapter.test.ts instead. The same reason
+    // applies to `cursor`, which is why both skip those assertions.
+    async observeOutbound(_adapter, parsed) {
+      const cascadeId = "00000000-0000-4000-8000-000000000000";
+      return JSON.stringify({
+        tools: toDevinToolDefinitions(parsed.context.tools, parsed.options.toolChoice).map(tool => ({
+          name: tool.name,
+          description: tool.description,
+        })),
+        toolChoice: toDevinToolChoiceForConformance(parsed.options.toolChoice, parsed.context.tools),
+        // Continuation assertions look for the replayed call, which for Cascade lives on the
+        // assistant prompt row rather than in a message-level `tool_calls` array.
+        prompts: projectDevinPrompts(parsed.context.messages, cascadeId).map(prompt => ({
+          source: prompt.source,
+          prompt: prompt.prompt,
+          toolCalls: prompt.toolCalls,
+          toolCallId: prompt.toolCallId,
+        })),
+        modelUid: resolveWireUid(
+          parsed.modelId,
+          typeof parsed.options.reasoning === "string" ? parsed.options.reasoning : undefined,
+        ),
+      });
     },
   },
 } satisfies Record<AdapterWire, ToolWireDriver>;

@@ -101,10 +101,24 @@ The dashboard quota row now reads the Devin CLI's own cache. Discovery path:
 `GetUserStatus` RPC (`server.codeium.com/exa.seat_management_pb.SeatManagementService/GetUserStatus`)
 carries `plan_status.daily/weekly_quota_remaining_percent` plus reset
 timestamps (confirmed by decoding the live response, captured by pointing
-`api_server_url` at a local passthrough). The CLI does NOT make that RPC
-replayable from outside: its Authorization header is an encrypted transform
-of the stored key and the request body carries a server-validated per-call
-nonce, so opencodex does not probe on its own.
+`api_server_url` at a local passthrough).
+
+**CORRECTED 2026-09-12.** This section previously concluded, from the shape of
+the request the CLI sends, that the RPC "is not replayable from outside: its
+Authorization header is an encrypted transform of the stored key and the
+request body carries a server-validated per-call nonce". The observation was
+right; the inference was not. The server accepts a plain `application/proto`
+request carrying the raw session token in a protobuf `Metadata` envelope — no
+signature, no nonce, no credential transform. Measured: `GetUserJwt` returns
+HTTP 200 with a 1821-char JWT, `GetChatMessage` streams a working completion,
+`GetCliModelConfigs` returns the 209-entry roster, and `GetUserStatus` decodes
+to the same plan window this cache reports. See
+`_plan/260912_devin_cascade_http/000_plan.md` for the full protocol and the
+`devin-http` provider that now uses it.
+
+The cache reader stays here because the ACP bridge deliberately never handles
+the credential itself (the child CLI owns the login), so reading the cache keeps
+that provider's credential boundary intact — not because the RPC is unavailable.
 
 Instead `devin-usage.ts` reads the CLI-maintained cache
 (`~/.cache/devin/cli/user_status.<digest>.bin` = JSON envelope, base64

@@ -1,7 +1,38 @@
+/**
+ * Devin account quota — direct `GetUserStatus` RPC, with the CLI cache as a fallback.
+ *
+ * Two credentials reach the same account, so this module offers two readers:
+ *
+ * 1. `fetchDevinQuotaLive(token)` — calls the seat-management `GetUserStatus` RPC directly.
+ *    The RPC accepts the stored session token verbatim in a plain protobuf `Metadata` envelope:
+ *    no signature, no per-call nonce, no credential transform (verified 2026-09-12 against the
+ *    live service; the encoded response decodes to the same plan window the CLI cache reports).
+ *    This is the reader the `devin-http` provider uses, because that provider already holds the
+ *    token for its chat path.
+ *
+ * 2. `fetchDevinUsageSnapshot()` — reads the CLI's own `user_status.<digest>.bin` cache. The `devin`
+ *    (ACP) provider uses this one: it deliberately never handles the credential itself (the child
+ *    CLI owns the login), so reading the cache keeps the ACP path's credential boundary intact.
+ *
+ * The distinction matters. An earlier revision of this module stated that the RPC "is not
+ * replayable from outside" because the CLI encrypts its Authorization header and signs a per-call
+ * nonce. That describes the CLI's OWN request shape, not the server's requirement: a plain
+ * `application/proto` request with the raw token is accepted. The cache reader stays because it is
+ * still the right shape for the CLI-bridge provider, not because the RPC is unavailable.
+ *
+ * Field numbers below are read off the live wire (devin 3000.10.21, 2026-09-11/12) with a generic
+ * decoder, cross-checked against the schema strings in the CLI binary:
+ *   user_status(field 1) → plan_status(field 13):
+ *     field 2.1 = daily_quota_reset_at_unix, field 3.1 = weekly_quota_reset_at_unix,
+ *     field 14 = daily_quota_remaining_percent, field 15 = weekly_quota_remaining_percent
+ *   plan_status → field 1 (plan/user info) → field 2 = plan name ("Pro"/"Max"/...)
+ */
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import type { ProviderQuota } from "./quota-types";
+import { buildDevinMetadata, DEVIN_CASCADE_BASE_URL } from "../adapters/devin-http/client";
+import { encodeGetUserJwtRequest } from "../adapters/devin-http/proto";
 
 /**
  * Devin CLI account quota — read from the CLI's own GetUserStatus cache.
@@ -199,6 +230,47 @@ export function parseDevinUserStatus(response: Buffer): DevinUsageSnapshot | nul
   };
 }
 
+export const DEVIN_GET_USER_STATUS_PATH = "/exa.seat_management_pb.SeatManagementService/GetUserStatus";
+
+/**
+ * Read the account's plan windows straight from the seat-management RPC.
+ *
+ * Returns null on any failure — a missing credential, a network error, or an unrecognised response
+ * shape — because a quota row is advisory and an invented number is worse than an absent one.
+ */
+export async function fetchDevinQuotaLive(
+  token: string,
+  deps: { fetch?: typeof globalThis.fetch; baseUrl?: string } = {},
+): Promise<ProviderQuota | null> {
+  if (!token.trim()) return null;
+  try {
+    // The seat-management RPC takes the same `Metadata` envelope as every other Cascade call, so
+    // the request is the generic one rather than a bespoke message.
+    const response = await (deps.fetch ?? globalThis.fetch)(
+      `${(deps.baseUrl ?? DEVIN_CASCADE_BASE_URL).replace(/\/+$/, "")}${DEVIN_GET_USER_STATUS_PATH}`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/proto",
+          "connect-protocol-version": "1",
+          accept: "*/*",
+        },
+        body: encodeGetUserJwtRequest(buildDevinMetadata(token)) as unknown as BodyInit,
+        signal: AbortSignal.timeout(15_000),
+      },
+    );
+    if (!response.ok) return null;
+    const payload = Buffer.from(await response.arrayBuffer());
+    const snapshot = parseDevinUserStatus(payload);
+    if (!snapshot) return null;
+    return buildQuotaFromSnapshot(snapshot, Date.now());
+  } catch {
+    // A quota row is advisory: any transport, auth, or decode failure degrades to "no row"
+    // rather than surfacing an error for a dashboard adornment.
+    return null;
+  }
+}
+
 /**
  * Build the dashboard quota from the CLI cache. `remaining` is inverted into the used-percentage
  * convention every other window on `ProviderQuota` speaks, so the dashboard bars read like the
@@ -210,6 +282,11 @@ export function fetchDevinUsageSnapshot(): ProviderQuota | null {
   const snapshot = parseDevinUserStatus(cache.payload);
   if (!snapshot) return null;
 
+  return buildQuotaFromSnapshot(snapshot, cache.fetchedAtMs || Date.now());
+}
+
+/** Shared shaping so both readers produce identical windows for identical data. */
+function buildQuotaFromSnapshot(snapshot: DevinUsageSnapshot, updatedAt: number): ProviderQuota {
   const customWindows: ProviderQuota["customWindows"] = [];
   if (snapshot.dailyRemainingPercent !== undefined) {
     customWindows.push({
@@ -218,7 +295,7 @@ export function fetchDevinUsageSnapshot(): ProviderQuota | null {
       ...(snapshot.dailyResetAt !== undefined ? { resetAt: snapshot.dailyResetAt } : {}),
     });
   }
-  const quota: ProviderQuota = { updatedAt: cache.fetchedAtMs || Date.now() };
+  const quota: ProviderQuota = { updatedAt };
   if (customWindows.length > 0) quota.customWindows = customWindows;
   if (snapshot.weeklyRemainingPercent !== undefined) {
     quota.weeklyPercent = 100 - snapshot.weeklyRemainingPercent;

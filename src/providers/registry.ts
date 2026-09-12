@@ -19,6 +19,7 @@ import {
   cursorModelReasoningEfforts,
 } from "../adapters/cursor/discovery";
 import { cursorFastCapableBases } from "../adapters/cursor/catalog";
+import { DEVIN_CASCADE_BASE_URL } from "../adapters/devin-http/client";
 import { COMMAND_CODE_MODEL_REASONING_EFFORTS } from "./command-code-efforts";
 import { isCanonicalOpenRouterTarget } from "./openrouter-routing";
 import {
@@ -37,6 +38,13 @@ import {
 } from "./codebuddy-models";
 import { QODER_CN_MODELS, QODER_GLOBAL_MODELS, QODER_REASONING_EFFORTS } from "./qoder-models";
 import { DEVIN_API_MODELS, DEVIN_API_MODEL_CONTEXT_WINDOWS, DEVIN_CLI_MODEL_CONTEXT_WINDOWS, DEVIN_CLI_MODEL_DEFAULT_REASONING_EFFORTS, DEVIN_CLI_MODEL_REASONING_EFFORTS, DEVIN_CLI_MODELS } from "./devin-models";
+import {
+  DEVIN_HTTP_MODELS,
+  DEVIN_HTTP_MODEL_CONTEXT_WINDOWS,
+  DEVIN_HTTP_MODEL_DEFAULT_REASONING_EFFORTS,
+  DEVIN_HTTP_MODEL_INPUT_MODALITIES,
+  DEVIN_HTTP_MODEL_REASONING_EFFORTS,
+} from "./devin-http-models";
 
 export type ProviderAuthKind = "forward" | "oauth" | "key" | "local";
 export type MetadataModelIdNormalize = "case-insensitive";
@@ -3490,6 +3498,50 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     modelReasoningEfforts: DEVIN_CLI_MODEL_REASONING_EFFORTS,
     modelDefaultReasoningEfforts: DEVIN_CLI_MODEL_DEFAULT_REASONING_EFFORTS,
     note: "Bridges the official Devin CLI (`devin acp`, Agent Client Protocol over stdio) as a text/reasoning channel. Requires the CLI: `curl -fsSL https://cli.devin.ai/install.sh | bash`, then `devin auth login` (Free plan eligible); a DEVIN_API_KEY-compatible provider key is optional. The agent keeps its own tools and ignores Codex's tool list; permission requests are always declined and sessions are locked to the read-only ask mode. Reasoning variants (swe-2-medium/high/max) surface as effort ladders on the base id. Model roster is account-specific via `devin models list --format json`; the static seed is a fallback. Not an OpenAI-compatible endpoint — see `devin-api` for the per-token catalog.",
+  },
+  {
+    // Direct Cascade HTTP: the same backend the CLI talks to, called over connectrpc without
+    // spawning anything. This is a REAL model contract — Codex's tool list reaches the model and
+    // the model's tool_calls come back for Codex to execute (verified on the live service,
+    // including finish_reason tool_calls and correct arguments).
+    //
+    // THE TRADE against the `devin` ACP entry above: this path exposes the account's full roster
+    // (74 selectable models across every hosted family, not just Cognition's own SWE line) and real
+    // tool calling, but the read-only posture the ACP bridge enforces by refusing permission
+    // requests does not exist here. There is no local agent to contain — only a model — so nothing
+    // can act on the workspace except through the tool calls Codex chooses to run. The two entries
+    // are intentionally both shipping so a user can pick containment or capability.
+    //
+    // Credentials: reuses what `devin auth login` already stored
+    // (~/.local/share/devin/credentials.toml, key `windsurf_api_key`), so a user with the CLI
+    // installed needs no configuration at all. An explicit key in provider.apiKey wins, which is
+    // the multi-account path.
+    //
+    // The wire is reverse-engineered (private, undocumented, and free to change): endpoints and
+    // field numbers were read off the live service on 2026-09-12. See
+    // src/adapters/devin-http/client.ts for the boundary this establishes.
+    id: "devin-http",
+    label: "Devin HTTP (Cascade)",
+    baseUrl: DEVIN_CASCADE_BASE_URL,
+    adapter: "devin-http",
+    authKind: "key",
+    // Optional for the same reason as the ACP entry: the CLI's stored credential is the primary
+    // path, so a user never has to paste anything for this provider to work.
+    keyOptional: true,
+    apiKeyValidation: "unknown",
+    preserveCustomDestination: true,
+    dashboardUrl: "https://app.devin.ai",
+    defaultModel: "swe-2",
+    models: [...DEVIN_HTTP_MODELS],
+    liveModels: true,
+    modelContextWindows: DEVIN_HTTP_MODEL_CONTEXT_WINDOWS,
+    modelInputModalities: DEVIN_HTTP_MODEL_INPUT_MODALITIES,
+    // Reasoning rungs are SUFFIXES on the wire (claude-opus-5-high). The seed folds them into
+    // per-model ladders, and DEVIN_HTTP_MODEL_WIRE_UIDS keeps the exact uid per rung because the
+    // suffix order is not uniform across families.
+    modelReasoningEfforts: DEVIN_HTTP_MODEL_REASONING_EFFORTS,
+    modelDefaultReasoningEfforts: DEVIN_HTTP_MODEL_DEFAULT_REASONING_EFFORTS,
+    note: "Calls Cognition's Cascade backend directly over connectrpc/protobuf — the same service the Devin CLI uses, without the CLI. Requires Devin credentials: either an explicit provider key or an existing `devin auth login` (~/.local/share/devin/credentials.toml). Unlike the `devin` (ACP) provider this is a full model contract: Codex's tools are sent to the model and its tool calls come back for Codex to run, so the read-only containment the ACP bridge enforces does not apply. Model roster is entitlement-aware (74 selectable ids folded from ~209 roster variants); the static seed is a fallback. The wire is reverse-engineered and undocumented — see `devin` (ACP) for the vendor-CLI path and `devin-api` for the per-token catalog.",
   },
 ];
 

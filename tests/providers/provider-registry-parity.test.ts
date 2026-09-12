@@ -38,7 +38,7 @@ const EXPECTED_KEY_PROVIDER_IDS = [
   "volcengine", "volcengine-coding-plan", "volcengine-agent-plan", "qianfan", "alibaba", "alibaba-token-plan", "alibaba-token-plan-intl", "parallel", "zenmux", "litellm", "ollama-cloud", "mistral",
   "minimax", "minimax-cn", "kimi-code", "opencode-zen", "vercel-ai-gateway",
   "opencode-free", "xiaomi", "xiaomi-mimo", "kilo", "mimo-free", "mimo", "cloudflare-ai-gateway", "cloudflare-workers-ai", "gitlab-duo",
-  "qoder", "qoder-cn", "codebuddy", "codebuddy-cn", "devin-api", "devin",
+  "qoder", "qoder-cn", "codebuddy", "codebuddy-cn", "devin-api", "devin", "devin-http",
 ];
 
 describe("provider registry parity", () => {
@@ -704,15 +704,16 @@ describe("provider registry parity", () => {
     expect(moonshot?.preserveReasoningContentModels).toContain("kimi-k3");
   });
 
-  test("LiteLLM, opencode-free, mimo-free, and devin are the registry seeds with optional key authentication", () => {
+  test("LiteLLM, opencode-free, mimo-free, devin, and devin-http are the registry seeds with optional key authentication", () => {
     const litellm = PROVIDER_REGISTRY.find(entry => entry.id === "litellm");
     const optionalKeyProviders = PROVIDER_REGISTRY.filter(entry => entry.keyOptional).map(entry => entry.id);
 
     expect(litellm?.authKind).toBe("key");
     expect(providerConfigSeed(litellm!).keyOptional).toBe(true);
-    // devin is optional on purpose: the credential can live in the CLI's own login cache
-    // (devin auth login, Free-plan eligible), so a pasted key must not be required.
-    expect(optionalKeyProviders).toEqual(["litellm", "opencode-free", "mimo-free", "devin"]);
+    // devin and devin-http are optional on purpose: the credential can live in the CLI's own login
+    // cache (devin auth login, Free-plan eligible), which devin-http reads from credentials.toml,
+    // so a pasted key must not be required for either.
+    expect(optionalKeyProviders).toEqual(["litellm", "opencode-free", "mimo-free", "devin", "devin-http"]);
   });
 
   test("NVIDIA NIM is free-tier priced but still requires an API key", () => {

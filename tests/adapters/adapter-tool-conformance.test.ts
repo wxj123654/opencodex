@@ -36,6 +36,7 @@ const WIRE_MODELS: Record<AdapterWire, string> = {
   cursor: "cursor/auto",
   codebuddy: "glm-5.3",
   devin: "swe-1.7",
+  "devin-http": "swe-2",
 };
 
 function providerFixture(adapterId: string, wire: AdapterWire): OcxProviderConfig {
@@ -50,6 +51,7 @@ function providerFixture(adapterId: string, wire: AdapterWire): OcxProviderConfi
     cursor: "https://api2.cursor.sh",
     codebuddy: "https://www.codebuddy.ai",
     devin: "https://cli.devin.ai",
+    "devin-http": "https://server.codeium.com",
   };
   // Semantic wrappers with provider-specific URL shapes must override the wire-family default here.
   const baseUrl = adapterId === "mimo-free"
@@ -236,6 +238,11 @@ function advertisedToolNames(wire: AdapterWire, body: string): string[] {
     const params = parsed.params as { tools?: Array<{ name?: string }> } | undefined;
     return (params?.tools ?? []).flatMap(tool => typeof tool.name === "string" ? [tool.name] : []);
   }
+  if (wire === "devin-http") {
+    // The shared driver already decoded the protobuf frame and re-exposed the catalog as JSON.
+    const tools = parsed.tools as Array<{ name?: string }> | undefined;
+    return (tools ?? []).flatMap(tool => typeof tool.name === "string" ? [tool.name] : []);
+  }
   const state = parsed.conversationState as {
     currentMessage?: {
       userInputMessage?: {
@@ -260,6 +267,13 @@ function toolCallsDisabled(wire: AdapterWire, body: string): boolean {
   if (wire === "google") {
     const config = parsed.toolConfig as { functionCallingConfig?: { mode?: unknown } } | undefined;
     return config?.functionCallingConfig?.mode === "NONE";
+  }
+  if (wire === "devin-http") {
+    // Cascade expresses a disabled surface two ways and the adapter does both: the catalog is
+    // filtered to empty AND the choice is pinned to `none`. Either alone is enough here.
+    if ((parsed.tools as unknown[] | undefined)?.length === 0) return true;
+    const choice = parsed.toolChoice as { optionName?: unknown } | undefined;
+    return choice?.optionName === "none";
   }
   return false;
 }
@@ -344,6 +358,18 @@ function continuationInput(wire: AdapterWire, body: string): string | undefined 
       if (typeof item.name !== "string" || !item.name.includes("apply_patch")) continue;
       if (item.type === "custom_tool_call") return inputFromValue(item.input);
       if (item.type === "function_call") return inputFromValue(item.arguments);
+    }
+    return undefined;
+  }
+  if (wire === "devin-http") {
+    // Replayed calls live on the assistant prompt row, and each carries a pre-serialized JSON
+    // arguments string rather than a nested object.
+    const prompts = parsed.prompts as Array<{ toolCalls?: Array<{ name?: string; argumentsJson?: string }> }> | undefined;
+    for (const prompt of prompts ?? []) {
+      for (const call of prompt.toolCalls ?? []) {
+        if (!call.name?.includes("apply_patch")) continue;
+        return inputFromValue(call.argumentsJson);
+      }
     }
     return undefined;
   }
@@ -456,9 +482,10 @@ describe("registry-derived routed tool conformance", () => {
       const contract = effectiveAdapterContract(adapterId);
       const driver = TOOL_WIRE_DRIVERS[contract.wire];
       if (!driver.streamingToolCall) {
-        // OpenAI Responses is a normal passthrough here and only parses routed compaction;
-        // Cursor's proprietary runTurn stream has focused parser coverage elsewhere.
-        expect(["openai-responses", "cursor"]).toContain(contract.wire);
+        // Adapters whose transport is a runTurn stream (Cursor, Devin HTTP) never route through
+        // parseStream here; their stream mapping is covered by focused adapter tests.
+        // OpenAI Responses is a normal passthrough that only parses routed compaction.
+        expect(["openai-responses", "cursor", "devin-http"]).toContain(contract.wire);
         continue;
       }
       expect(await restoredStreamInput(adapterId, contract.wire), adapterId).toBe(PATCH);
@@ -512,7 +539,7 @@ describe("registry-derived routed tool conformance", () => {
       const contract = effectiveAdapterContract(adapterId);
       const driver = TOOL_WIRE_DRIVERS[contract.wire];
       if (!driver.streamingToolCall || !driver.extractWireToolName) {
-        expect(["openai-responses", "cursor"]).toContain(contract.wire);
+        expect(["openai-responses", "cursor", "devin-http"]).toContain(contract.wire);
         continue;
       }
 

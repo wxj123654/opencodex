@@ -272,3 +272,13 @@ and still lose it when a custom squash message replaces that text. Before
 calling a carry credited, inspect the **actual landing commit**: its final
 `Co-authored-by` trailer must remain present and resolve to the source author's
 GitHub account. The existing presence gate alone does not establish either fact.
+
+## Adapted third-party source
+
+This page is about work carried from a pull request. Adapted source files are a
+different debt and are recorded here for the same reason: so the credit exists
+somewhere durable and reviewable.
+
+| Source | License | Landed as | What was adapted |
+| --- | --- | --- | --- |
+| [CaiJingLong/devin-gateway](https://github.com/CaiJingLong/devin-gateway) | MIT, Copyright (c) 2026 CaiJingLong | `src/adapters/devin-http/proto.ts` | The protobuf encoder/decoder scaffolding for Devin's Cascade Connect API (varint handling, message/repeated-field helpers, decoder skip semantics). The field numbers and message shapes in that file were verified independently against the live service; the roster fold, response decoders, client, and adapter are original to opencodex. Attribution is repeated in the file header, which is where a reader of the code will look. |

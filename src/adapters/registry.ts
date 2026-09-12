@@ -4,6 +4,7 @@ import type { ProviderAdapter } from "./base";
 import { withClinePassDeepSeekV4ToolReplayCompatibility } from "./cline-pass-deepseek-v4-tool-replay";
 import { createCodeBuddyAdapter } from "./codebuddy/adapter";
 import { createDevinAdapter } from "./devin";
+import { createDevinHttpAdapter } from "./devin-http";
 import { createQoderAdapter } from "./qoder/adapter";
 import { createCommandCodeAdapter } from "./command-code";
 import { createCursorAdapter } from "./cursor";
@@ -32,7 +33,8 @@ export type AdapterWire =
   | "google"
   | "kiro"
   | "cursor"
-  | "devin";
+  | "devin"
+  | "devin-http";
 
 export type AdapterMutationContract =
   | "codex-owned"
@@ -126,6 +128,11 @@ export const ADAPTER_REGISTRY = {
     wire: "devin",
     mutation: "codex-owned",
     create: (provider: OcxProviderConfig, _context: AdapterFactoryContext) => createDevinAdapter(provider),
+  },
+  "devin-http": {
+    wire: "devin-http",
+    mutation: "codex-owned",
+    create: (provider: OcxProviderConfig, _context: AdapterFactoryContext) => createDevinHttpAdapter(provider),
   },
 } as const satisfies Record<string, AdapterDefinition>;
 

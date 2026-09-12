@@ -24,6 +24,7 @@ const EXPECTED_ADAPTER_NAMES = {
   "mimo-free": "mimo-free",
   qoder: "qoder",
   devin: "devin",
+  "devin-http": "devin-http",
 } as const;
 
 function provider(adapter: string): OcxProviderConfig {

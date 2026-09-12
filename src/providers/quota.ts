@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { fetchDevinUsageSnapshot as fetchDevinQuota } from "./devin-usage";
+import { fetchDevinUsageSnapshot as fetchDevinQuota, fetchDevinQuotaLive } from "./devin-usage";
 import {
   effectiveCodexAuthAccountId,
   fetchMainAccountInfoSnapshot,
@@ -15,6 +15,7 @@ import { resolveProviderApiKey } from "./key-store";
 import { getValidAccessToken, getValidAccessTokenForAccount } from "../oauth";
 import { getAccountCredential, getAccountSet, getCredential } from "../oauth/store";
 import { antigravityUserAgent } from "../adapters/client-fingerprint";
+import { resolveDevinToken } from "../adapters/devin-http/credentials";
 import { isCanonicalOllamaCloudUrl } from "../adapters/ollama-native-url";
 import { providerOutboundPost, providerRedirectError, type ProviderOutboundDependencies } from "../lib/provider-outbound";
 import { apiKeyPoolEntryId } from "./api-keys";
@@ -3065,13 +3066,32 @@ function keyQuotaReaderForProvider(name: string, provider: OcxProviderConfig): K
   if (name === "deepseek" && isCanonicalDeepSeekBaseUrl(provider.baseUrl)) return fetchDeepSeekQuota;
   if (name === "cline-pass" && isCanonicalClineBaseUrl(provider.baseUrl)) return fetchClineQuota;
   if (isCanonicalOllamaCloudBaseUrl(provider.baseUrl ?? getProviderRegistryEntry(name)?.baseUrl)) return fetchOllamaCloudQuota;
-  // Devin CLI bridge: quota comes from the CLI's own GetUserStatus cache (read-only, no probe
-  // of our own — the CLI layers an encrypted credential transform we do not reproduce).
+  // Devin CLI bridge: quota comes from the CLI's own GetUserStatus cache. The ACP provider never
+  // handles the credential itself (the child CLI owns the login), so reading the cache keeps that
+  // provider's credential boundary intact.
   if (provider.adapter === "devin") {
     return async (id) => {
       const quota = fetchDevinQuota();
       if (!quota) return null;
       return { provider: id, label: "Devin CLI cache", source: "cli-cache", quota, updatedAt: quota.updatedAt };
+    };
+  }
+  // Devin direct HTTP: this provider already holds the session token for its chat path, so the
+  // seat-management RPC is queried directly instead of reading whatever the CLI last cached.
+  // Freshness is the difference: the cache only advances when the user runs a `devin` command.
+  if (provider.adapter === "devin-http") {
+    return async (id) => {
+      // The same resolver the chat path uses, so an explicit key and the CLI's stored credential
+      // both work here. A quota failure degrades to no row rather than an error.
+      let token = "";
+      try {
+        token = resolveDevinToken(provider);
+      } catch {
+        token = "";
+      }
+      const quota = token ? await fetchDevinQuotaLive(token) : null;
+      if (!quota) return null;
+      return { provider: id, label: "Devin account", source: "api", quota, updatedAt: quota.updatedAt };
     };
   }
   if (["zai", "glm", "glm-cn", "zhipu-bigmodel-coding"].includes(name) && isCanonicalZaiBaseUrl(provider.baseUrl)) return fetchZaiQuota;
