@@ -53,6 +53,7 @@ import { filterCursorConfiguredModelsByLiveDiscovery } from "../../adapters/curs
 import { fetchCursorUsableModels } from "../../adapters/cursor/live-models";
 import { recordLiveCursorClaudeModels, recordLiveCursorMaxModeModels } from "../../adapters/cursor/catalog";
 import { fetchDevinHttpModelsLive } from "../../adapters/devin-http/discovery";
+import { readDevinTokenFromDisk } from "../../adapters/devin-http/credentials";
 import { fetchQoderModels } from "../../adapters/qoder/live-models";
 import { resolveQoderProfile } from "../../adapters/qoder/profiles";
 import { isCanonicalOpenAiForwardProvider, OPENAI_API_PROVIDER_ID, OPENAI_CODEX_PROVIDER_ID } from "../../providers/openai-tiers";
@@ -1713,7 +1714,16 @@ async function fetchProviderModelsWithAuth(
         "authoritative",
       );
     }
-    if (!apiKey) {
+    // The CLI's stored credential IS this provider's zero-configuration path (registry
+    // `keyOptional: true`), so the catalog must fall back to it exactly as the chat path does.
+    // The shared resolver only knows provider.apiKey and the OAuth stores, which is why an
+    // unconfigured devin-http used to degrade on every gather: the seed then became a degraded
+    // (never authoritative) catalog, which left `initialModelSelection` pending forever and
+    // disabled every model switch in the Models inventory. Chat kept working the whole time,
+    // because the turn resolves the credential through `resolveDevinToken` — the two paths
+    // disagreeing about credentials was the bug.
+    const discoveryToken = apiKey?.trim() || readDevinTokenFromDisk();
+    if (!discoveryToken) {
       // No credential means no roster. Degrade to the seed rather than probing, so a missing key
       // shows the static catalog instead of an error for a provider the user may not even use.
       const staleNoAuth = getStaleCached(name);
@@ -1727,7 +1737,7 @@ async function fetchProviderModelsWithAuth(
         cooling ? applyConfigHintsToCachedModels(name, prov, cooling, contextCap, metadataModelIdCaseFold, captured.effectiveAlias) : configured,
       ), "degraded");
     }
-    const liveHttp = await fetchDevinHttpModelsLive(apiKey);
+    const liveHttp = await fetchDevinHttpModelsLive(discoveryToken);
     if (liveHttp.ok) {
       // The roster fold is authoritative for the ladder AND for the exact wire uid per rung; a
       // base-internal id gets the maintainer-calibrated registry hints on top.

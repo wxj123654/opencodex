@@ -143,7 +143,13 @@ describe("devin-http credential resolution", () => {
   test("a missing credential is a configuration error even with an Authorization header present", () => {
     // No configured key, nothing on disk: the header must not become a credential, so this throws
     // (mapped to a 401 missing_credential by the turn) instead of forwarding junk upstream.
-    expect(() => resolveDevinToken(provider({ apiKey: undefined }))).toThrow(DevinMissingCredentialError);
+    //
+    // The environment is isolated on purpose: `resolveDevinToken` reads the CLI's real
+    // credentials.toml as its zero-configuration fallback, so a developer machine that has run
+    // `devin auth login` would satisfy this "nothing on disk" case from the ambient HOME and the
+    // test would pass or fail depending on who runs it.
+    expect(() => withIsolatedDevinHome(() => resolveDevinToken(provider({ apiKey: undefined }))))
+      .toThrow(DevinMissingCredentialError);
   });
 
   test("the turn sends the DISK credential even when the request carries an Authorization header", async () => {
@@ -204,8 +210,11 @@ describe("devin-http credential resolution", () => {
   });
 
   test("credential file candidates honour the CLI's own config-dir override first", () => {
+    // `join` is platform-specific, so the expectation carries the platform's own separator instead
+    // of a POSIX literal: a hard-coded "/custom/devin/credentials.toml" passed on Linux/macOS and
+    // failed on Windows, where the same call returns "\\custom\\devin\\credentials.toml".
     const candidates = devinCredentialFileCandidates({ DEVIN_CONFIG_DIR: "/custom/devin" } as NodeJS.ProcessEnv);
-    expect(candidates[0]).toBe("/custom/devin/credentials.toml");
+    expect(candidates[0]).toBe(join("/custom/devin", "credentials.toml"));
   });
 });
 
@@ -715,4 +724,27 @@ function writeTemp(contents: string): string {
   const file = join(dir, "credentials.toml");
   writeFileSync(file, contents);
   return file;
+}
+
+/**
+ * Run `body` with every credential location this provider consults pointed at an empty directory.
+ *
+ * `resolveDevinToken` falls back to the CLI's stored credential, so any assertion about "no
+ * credential" is only meaningful with HOME/APPDATA/DEVIN_CONFIG_DIR redirected away from the real
+ * machine.
+ */
+function withIsolatedDevinHome<T>(body: () => T): T {
+  const empty = mkdtempSync(join(tmpdir(), "devin-empty-home-"));
+  const keys = ["HOME", "USERPROFILE", "XDG_DATA_HOME", "APPDATA", "LOCALAPPDATA", "DEVIN_CONFIG_DIR"] as const;
+  const previous = keys.map(key => [key, process.env[key]] as const);
+  for (const key of keys) process.env[key] = empty;
+  try {
+    return body();
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(empty, { recursive: true, force: true });
+  }
 }

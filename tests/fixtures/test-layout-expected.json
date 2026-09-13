@@ -446,6 +446,7 @@
   "desktop-remote-store.test.ts": "clients",
   "destination-policy-resolved.test.ts": "routing",
   "devin-http-adapter.test.ts": "providers",
+  "devin-http-catalog-credential.test.ts": "providers",
   "devin-http-proto.test.ts": "providers",
   "devin-http-roster.test.ts": "providers",
   "digitalocean-scaleway-provider.test.ts": "providers",

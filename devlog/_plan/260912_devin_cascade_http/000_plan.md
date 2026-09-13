@@ -176,6 +176,34 @@ All from the Free plan on 2026-09-12, devin 3000.10.21.
 3. **`resolveWireUid` discarded the default-effort map,** so `swe-2` sent the
    bare uid the server rejects. Found by a unit test.
 
+4. **The catalog gather never consulted the CLI credential** (found 2026-09-13
+   from a report that every `devin-http` switch was disabled with "initial
+   discovery pending"). The chat path resolves this provider's zero-configuration
+   credential through `resolveDevinToken` — `provider.apiKey`, then the CLI's
+   `credentials.toml`. The catalog's shared `resolveModelsAuthToken` knows only
+   `provider.apiKey` and the OAuth stores, and the devin-http branch bailed out on
+   a missing `apiKey` before calling discovery at all. So an unconfigured
+   provider (the documented setup: `keyOptional: true`, no pasted key) degraded
+   on every gather, even with a working login on disk.
+
+   The user-visible failure was not the model list, which still rendered from the
+   static seed. A degraded outcome is never authoritative, and
+   `reconcileInitialModelSelections` decides only for authoritative providers —
+   so `initialModelSelection` stayed `pending` forever. `listManagementModelRows`
+   turns a pending registration into `disabled: true` on every row plus
+   `initialSelectionPending: true`, and the visibility API answers 409
+   (`initial_model_selection_pending`) to any switch, with "Refresh the model list
+   and retry" — which could never help, because the degradation was permanent.
+
+   The ACP entry this one replaced did not have the bug: its branch called the
+   CLI-backed discovery without inspecting `apiKey`. The `if (!apiKey)` guard
+   arrived with the HTTP rewrite.
+
+   Fix: fall back to `readDevinTokenFromDisk()` in the devin-http branch only, so
+   both paths resolve the credential from the same places. Regression test:
+   `devin-http-catalog-credential.test.ts` (red before the fix: the discovery
+   stub received `undefined` instead of the stored credential).
+
 ## Residuals
 
 - The wire is private and undocumented. Endpoints and field numbers were read
@@ -203,9 +231,22 @@ All from the Free plan on 2026-09-12, devin 3000.10.21.
   axis/effort arrangement, ladder assembly, wire-uid resolution, and seed
   consistency invariants (every wire uid decomposes back to the id it is filed
   under).
-- `tests/providers/devin-http-adapter.test.ts` — 56: credential precedence,
+- `tests/providers/devin-http-adapter.test.ts` — 58: credential precedence,
   request projection, completion configuration, both tool-call delivery shapes,
   usage selection, terminal discipline, abort, and the adapter surface.
+  The two credential cases that assert on "nothing on disk" isolate HOME/APPDATA
+  first: `resolveDevinToken` reads the CLI's real `credentials.toml` as its
+  zero-configuration fallback, so an unisolated assertion passes or fails
+  depending on whether the machine running it has run `devin auth login`.
+- `tests/providers/devin-http-catalog-credential.test.ts` — 3: the catalog
+  gather resolves the same CLI credential the chat path does. Registered
+  without `provider.apiKey`, the catalog used to degrade on every gather
+  because the shared `resolveModelsAuthToken` knows only `provider.apiKey` and
+  the OAuth stores. A degraded gather is never authoritative, and
+  `reconcileInitialModelSelections` decides only for authoritative providers —
+  so `initialModelSelection` stayed `pending` forever and `listManagementModelRows`
+  disabled every switch for the provider with no way out. Pins the credential
+  source, the explicit-key precedence, and the still-degraded no-credential path.
 - Registry-wide conformance: the adapter participates in
   `tests/adapters/adapter-tool-conformance.test.ts` through a new wire driver,
   so its tool catalog, `tool_choice: none` behavior, and continuation replay are
