@@ -265,6 +265,51 @@ describe("devin-http chat request", () => {
     expect(field(encoded, 22)!.length).toBeGreaterThan(0); // executionId
   });
 
+  test("modelConfig serializes the stable id, the monotonic turn, and the constant third field", () => {
+    const encoded = encodeGetChatMessageRequest({
+      ...baseRequest,
+      metadata: buildDevinMetadata("k"),
+      chatModelUid: "swe-2-high",
+      modelConfig: { id: "cfg-uuid", turn: 7 },
+    });
+    const modelConfig = field(encoded, 15)!;
+    expect(textField(modelConfig, 1)).toBe("cfg-uuid");
+    expect(varintField(modelConfig, 2)).toBe(7n);
+    // #15.3 is the constant 4 on every observed request from the real client.
+    expect(varintField(modelConfig, 3)).toBe(4n);
+  });
+
+  test("an absent modelConfig and an empty executionId encode to absent fields", () => {
+    const encoded = encodeGetChatMessageRequest({
+      ...baseRequest,
+      metadata: buildDevinMetadata("k"),
+      chatModelUid: "swe-2-high",
+      modelConfig: undefined,
+      executionId: "",
+    });
+    expect(field(encoded, 15)).toBeUndefined();
+    // The observed client sends no #22 on a conversation's first turn; the empty string must
+    // encode as an absent field, not as a present-but-empty one.
+    expect(field(encoded, 22)).toBeUndefined();
+  });
+
+  test("promptCacheKey rides #27 as the explicit cache-affinity key", () => {
+    const encoded = encodeGetChatMessageRequest({
+      ...baseRequest,
+      metadata: buildDevinMetadata("k"),
+      chatModelUid: "swe-2-high",
+      promptCacheKey: "conv-cache-key-1",
+    });
+    expect(textField(encoded, 27)).toBe("conv-cache-key-1");
+    const without = encodeGetChatMessageRequest({
+      ...baseRequest,
+      metadata: buildDevinMetadata("k"),
+      chatModelUid: "swe-2-high",
+      promptCacheKey: undefined,
+    });
+    expect(field(without, 27)).toBeUndefined();
+  });
+
   test("tool definitions serialize name, description, and the schema as a JSON string", () => {
     const encoded = encodeGetChatMessageRequest({
       ...baseRequest,
@@ -284,20 +329,20 @@ describe("devin-http chat request", () => {
     expect(textField(toolsField, 3)).toBe('{"type":"object"}');
   });
 
-  test("message prompts carry the source discriminator and assistant replays use SYSTEM", () => {
+  test("message prompts carry the source discriminator and assistant replays use ASSISTANT", () => {
     const encoded = encodeGetChatMessageRequest({
       ...baseRequest,
       metadata: buildDevinMetadata("k"),
       chatModelUid: "swe-2-high",
       chatMessagePrompts: [
         { messageId: "m1", source: ChatMessageSource.USER, prompt: "hi" },
-        { messageId: "bot-m1", source: ChatMessageSource.SYSTEM, prompt: "hello" },
+        { messageId: "bot-m1", source: ChatMessageSource.ASSISTANT, prompt: "hello" },
       ],
     });
     const prompts = collect(encoded, 3);
     expect(prompts).toHaveLength(2);
     const sources = prompts.map(p => Number(varintField(p.bytes!, 2)));
-    expect(sources).toEqual([ChatMessageSource.USER, ChatMessageSource.SYSTEM]);
+    expect(sources).toEqual([ChatMessageSource.USER, ChatMessageSource.ASSISTANT]);
   });
 });
 

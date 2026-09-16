@@ -55,7 +55,11 @@ const IDE_VERSION = "3.2.23";
 const EXTENSION_VERSION = "1.48.2";
 
 const AUTH_TIMEOUT_MS = 30_000;
-const DEFAULT_UPSTREAM_IDLE_MS = 120_000;
+// Matches the turn budget in turn.ts: a long-thinking model on a large replayed context can
+// legitimately take minutes before the first frame, and the language server applies no tighter
+// silence limit of its own. Mid-stream silence is now recovered by the loop guard's
+// continue-request path rather than surfacing as an immediate error.
+const DEFAULT_UPSTREAM_IDLE_MS = 300_000;
 
 /** Frame payload ceiling. A response frame larger than this is a protocol failure, not a big turn. */
 const MAX_FRAME_PAYLOAD = Math.min(MAX_CONNECT_FRAME_PAYLOAD_BYTES, 16 * 1024 * 1024);
@@ -284,6 +288,15 @@ export async function* streamDevinChat(
     clearTimeout(idleTimer);
     const payload = new Uint8Array(await response.arrayBuffer());
     const detail = redactSecretString(decodeErrorMessage(payload));
+    // 413 is the upstream nginx body cap (~14 MB measured), not a model error — the raw
+    // HTML page tells the user nothing actionable, so name the real cause and remedy.
+    if (response.status === 413) {
+      throw new DevinHttpError(
+        "Devin chat failed (413): request body exceeded the upstream ~14MB limit. " +
+        "The whole conversation is replayed each turn — start a new session or reduce image/history size.",
+        response.status,
+      );
+    }
     throw new DevinHttpError(`Devin chat failed (${response.status}): ${detail}`, response.status);
   }
   if (!response.body) {
@@ -298,7 +311,15 @@ export async function* streamDevinChat(
     for (;;) {
       let chunk: { done: boolean; value?: Uint8Array };
       try {
-        chunk = await reader.read();
+        // A pending read() does not reliably reject on abort in every runtime — race it against
+        // the abort signal so a silent stream still trips the idle path.
+        chunk = await Promise.race([
+          reader.read(),
+          new Promise<never>((_, reject) => {
+            if (controller.signal.aborted) reject(new Error("upstream idle"));
+            else controller.signal.addEventListener("abort", () => reject(new Error("upstream idle")), { once: true });
+          }),
+        ]);
       } catch (error) {
         if (controller.signal.aborted) {
           yield { type: "protocolError", message: `Devin stream went silent for ${Math.round(idleMs / 1000)}s.` };

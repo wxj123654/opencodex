@@ -238,6 +238,77 @@ test("chatCompletionsToResponsesBody maps messages/tools/system", () => {
   expect(input.some(i => i.type === "function_call_output" && i.call_id === "call_1")).toBe(true);
 });
 
+test("chatCompletionsToResponsesBody preserves assistant reasoning_content as a reasoning item before the message", () => {
+  // A client (pi, Cline, DeepSeek SDKs) replays the thinking it received as
+  // `reasoning_content` on the assistant turn. It must survive translation as a
+  // `reasoning` item ordered BEFORE the assistant message, because the Responses
+  // parser attributes pending reasoning to the FOLLOWING assistant turn.
+  const body = chatCompletionsToResponsesBody({
+    model: "devin-http/swe-2",
+    stream: true,
+    messages: [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "did it", reasoning_content: "I should greet first." },
+      { role: "user", content: "go on" },
+    ],
+  });
+  const input = body.input as Array<Record<string, unknown>>;
+  const reasoningIndex = input.findIndex(i => i.type === "reasoning");
+  const messageIndex = input.findIndex(i => i.type === "message" && i.role === "assistant");
+  expect(reasoningIndex).toBeGreaterThanOrEqual(0);
+  expect(messageIndex).toBeGreaterThan(reasoningIndex);
+  const reasoning = input[reasoningIndex] as { content?: Array<{ type?: string; text?: string }> };
+  expect(reasoning.content?.[0]?.text).toBe("I should greet first.");
+  expect(reasoning.content?.[0]?.type).toBe("reasoning_text");
+});
+
+test("chatCompletionsToResponsesBody keeps tool-call turns' reasoning ahead of the call items", () => {
+  const body = chatCompletionsToResponsesBody({
+    model: "devin-http/swe-2",
+    stream: true,
+    messages: [
+      { role: "user", content: "run it" },
+      {
+        role: "assistant",
+        content: null,
+        reasoning_content: "Plan: call the shell tool.",
+        tool_calls: [{ id: "call_9", type: "function", function: { name: "shell", arguments: "{}" } }],
+      },
+      { role: "tool", tool_call_id: "call_9", content: "ok" },
+    ],
+  });
+  const input = body.input as Array<Record<string, unknown>>;
+  const reasoningIndex = input.findIndex(i => i.type === "reasoning");
+  const callIndex = input.findIndex(i => i.type === "function_call");
+  expect(reasoningIndex).toBeGreaterThanOrEqual(0);
+  expect(callIndex).toBeGreaterThan(reasoningIndex);
+});
+
+test("chatCompletionsToResponsesBody emits no reasoning item when the assistant turn carried none", () => {
+  const body = chatCompletionsToResponsesBody({
+    model: "devin-http/swe-2",
+    stream: true,
+    messages: [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "plain" },
+      { role: "user", content: "again" },
+    ],
+  });
+  const input = body.input as Array<Record<string, unknown>>;
+  expect(input.some(i => i.type === "reasoning")).toBe(false);
+  // Empty-string reasoning_content must not mint an empty reasoning item either.
+  const withEmpty = chatCompletionsToResponsesBody({
+    model: "devin-http/swe-2",
+    stream: true,
+    messages: [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "plain", reasoning_content: "" },
+      { role: "user", content: "again" },
+    ],
+  });
+  expect((withEmpty.input as Array<Record<string, unknown>>).some(i => i.type === "reasoning")).toBe(false);
+});
+
 describe("chatCompletionsToResponsesBody prompt_cache_key cohort", () => {
   test("derives a stable cohort key when the caller sends none", () => {
     const mk = () => ({

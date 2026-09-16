@@ -447,8 +447,10 @@
   "destination-policy-resolved.test.ts": "routing",
   "devin-http-adapter.test.ts": "providers",
   "devin-http-catalog-credential.test.ts": "providers",
+  "devin-http-loop-fuse.test.ts": "providers",
   "devin-http-proto.test.ts": "providers",
   "devin-http-roster.test.ts": "providers",
+  "devin-http-session-identity.test.ts": "providers",
   "digitalocean-scaleway-provider.test.ts": "providers",
   "docs-429-failover-claims.test.ts": "ci-workflows",
   "docs-bun-source-requirement.test.ts": "ci-workflows",
@@ -1163,5 +1165,6 @@
   "zhipu-bigmodel-provider.test.ts": "providers",
   "zz-ci-api-usage-isolation.test.ts": "ci-workflows",
   "zz-ci-storage-policy-isolation.test.ts": "ci-workflows",
-  "zz-pr-coderabbit-readiness-revalidation.test.ts": "ci-workflows"
+  "zz-pr-coderabbit-readiness-revalidation.test.ts": "ci-workflows",
+  "devin-http-images.test.ts": "providers"
 }

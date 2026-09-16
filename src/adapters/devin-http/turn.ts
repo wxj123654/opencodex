@@ -22,6 +22,15 @@ import {
   type CompletionConfiguration,
   type ImageData,
 } from "./proto";
+import { resolveDevinSessionIdentity } from "./session-identity";
+import { prepareDevinImages } from "./images";
+import {
+  DevinLoopGuard,
+  LOOP_GUARD_MAX_CONTINUATIONS_PER_TURN,
+  LOOP_GUARD_MAX_TOOL_CALLS_PER_TURN,
+  type DevinLoopGuardDeps,
+  type LoopGuardReason,
+} from "./loop-fuse";
 import { resolveDevinWireUid } from "./roster";
 
 /**
@@ -36,12 +45,16 @@ import { resolveDevinWireUid } from "./roster";
  * `finish_reason: "tool_calls"` and correct arguments. That difference is why this is a `runTurn`
  * adapter with real tool semantics rather than another text-only bridge.
  *
- * ## Stateless per turn
+ * ## Stable session identity, stateless history
  *
- * Every turn sends the whole conversation and a fresh `cascadeId`. The API supports conversation
- * continuity through that id, but the proxy already owns replay via Responses
- * `previous_response_id`, and a second continuation axis would let the two disagree about what
- * history the model saw. A fresh id keeps the server's view a strict function of this request.
+ * Every turn still sends the whole conversation — the server's view of history remains a strict
+ * function of the request bytes, and there is no second continuation axis that could disagree
+ * with Responses `previous_response_id`. What is no longer fresh-per-turn is the IDENTITY of the
+ * conversation: `cascadeId` (`#16`), `ModelConfig { id, turn }` (`#15`), and `executionId` (`#22`)
+ * are derived per-conversation by `session-identity.ts`, matching the shape the observed real
+ * client sends. Minting fresh uuids per request made the upstream velocity limiter read one agent
+ * loop as N brand-new sessions — observed live as cache collapses and, at ~190 turns, as a
+ * degenerate same-command loop ending in a silent upstream stream.
  *
  * ## Verified wire behavior this module depends on
  *
@@ -95,6 +108,12 @@ const DEFAULT_MAX_NEWLINES = 200n;
 const DEFAULT_MAX_TOKENS = 64_000;
 
 export interface DevinHttpTurnDeps extends DevinHttpDeps {
+  /** Test seam: thresholds for the loop guard. Production leaves this unset. */
+  loopGuardDeps?: DevinLoopGuardDeps;
+  /** Named tool calls allowed per generation attempt before the stream is aborted. */
+  maxToolCallsPerTurn?: number;
+  /** Automatic continue-requests allowed per turn after mid-stream stalls. */
+  maxContinuationsPerTurn?: number;
   /** Test seam: resolve the credential without touching disk or the provider config. */
   token?: string;
   timeoutMs?: number;
@@ -138,10 +157,12 @@ function messageText(message: OcxMessage): string {
       ? message.content
       : message.content.map(part => (part.type === "text" ? part.text : "")).join("");
   }
+  // The assistant fallback deliberately SKIPS thinking parts: replayed thinking rides its own
+  // `#11` field (see `projectDevinPrompts`), and folding it into the `#3` prompt text as well
+  // would send the same reasoning twice on one message.
   return message.content
     .map(part => {
       if (part.type === "text") return part.text;
-      if (part.type === "thinking") return part.thinking;
       return "";
     })
     .join("");
@@ -159,6 +180,31 @@ function messageImages(message: OcxMessage): ImageData[] {
     if (match) images.push({ mimeType: match[1]!, base64Data: match[2]! });
   }
   return images;
+}
+
+/**
+ * The Responses parser synthesizes a JSON signature from the whole reasoning item when the
+ * client did not supply one (`JSON.stringify(reasoning)`). That blob is not a Devin thinking
+ * signature — forwarding it as `#12` would be a lie. Real Devin signatures are opaque non-JSON
+ * blobs issued by the upstream.
+ */
+function firstReplayableThinkingSignature(
+  parts: Array<Extract<OcxAssistantContentPart, { type: "thinking" }>>,
+): string | undefined {
+  for (const part of parts) {
+    const signature = part.signature?.trim();
+    if (!signature) continue;
+    if (signature.startsWith("{") || signature.startsWith("[")) {
+      try {
+        JSON.parse(signature);
+        continue;
+      } catch {
+        /* not JSON — a real Devin blob may happen to start with `{` */
+      }
+    }
+    return signature;
+  }
+  return undefined;
 }
 
 function assistantToolCalls(message: OcxMessage): ChatToolCall[] | undefined {
@@ -182,10 +228,12 @@ function assistantToolCalls(message: OcxMessage): ChatToolCall[] | undefined {
  * turn that produces an identical conversation also produces identical ids, which is what keeps the
  * prompt cache warm across a retry.
  *
- * Assistant turns are replayed as `SYSTEM`: the API has no ASSISTANT source, and the observed
- * client uses SYSTEM for the model's own prior output.
+ * Assistant turns replay as `ASSISTANT` (wire value 2) — the observed client's source for the
+ * model's own prior output. Empty assistant turns (no text, no tool calls, no thinking) are
+ * dropped: sending them verbatim measurably provokes repeated empty completions.
  */
-export function projectDevinPrompts(messages: OcxMessage[], cascadeId: string): ChatMessagePrompt[] {  const prompts: ChatMessagePrompt[] = [];
+export function projectDevinPrompts(messages: OcxMessage[], cascadeId: string): ChatMessagePrompt[] {
+  const prompts: ChatMessagePrompt[] = [];
   for (const [index, message] of messages.entries()) {
     if (message.role === "user") {
       const images = messageImages(message);
@@ -200,15 +248,19 @@ export function projectDevinPrompts(messages: OcxMessage[], cascadeId: string): 
 
     if (message.role === "assistant") {
       const toolCalls = assistantToolCalls(message);
-      const thinking = message.content
-        .filter((part): part is Extract<OcxAssistantContentPart, { type: "thinking" }> => part.type === "thinking")
-        .map(part => part.thinking)
-        .join("");
+      const thinkingParts = message.content.filter(
+        (part): part is Extract<OcxAssistantContentPart, { type: "thinking" }> => part.type === "thinking",
+      );
+      const thinking = thinkingParts.map(part => part.thinking).join("");
+      const prompt = messageText(message);
+      if (!prompt.trim() && !toolCalls && !thinking) continue;
+      const signature = firstReplayableThinkingSignature(thinkingParts);
       prompts.push({
         messageId: `bot-${deterministicMessageId(`${cascadeId}\0${index}\0assistant`)}`,
-        source: ChatMessageSource.SYSTEM,
-        prompt: messageText(message),
+        source: ChatMessageSource.ASSISTANT,
+        prompt,
         ...(thinking ? { thinking } : {}),
+        ...(signature ? { signature } : {}),
         ...(toolCalls ? { toolCalls } : {}),
       });
       continue;
@@ -398,8 +450,52 @@ export async function runDevinHttpTurn(
   }
 
   const modelUid = resolveWireUid(parsed.modelId, typeof parsed.options.reasoning === "string" ? parsed.options.reasoning : undefined);
-  const cascadeId = deps.randomId?.() ?? crypto.randomUUID();
-  const executionId = deps.randomId?.() ?? crypto.randomUUID();
+  // Conversation identity is stable per conversation (see the module comment): a fresh uuid per
+  // turn reads as N brand-new sessions upstream. History replay below stays unchanged — only the
+  // identity fields differ between turns.
+  const session = resolveDevinSessionIdentity(parsed.context.messages, {
+    randomId: deps.randomId,
+    now: deps.now,
+  });
+
+  // Loop guard: the conversation-scoped step budget (see loop-fuse.ts). Steering appends a
+  // user prompt to THIS request — auto-continue, never written back to the client's history.
+  // A fail action is the budget-exhausted hard stop: a non-retryable error so a retrying client
+  // cannot spin the same turn forever.
+  const loopGuard = new DevinLoopGuard(session.cascadeId, deps.loopGuardDeps);
+  const guardAction = loopGuard.evaluate(parsed.context.messages);
+  if (guardAction.kind === "fail") {
+    debugProviderDiagnostic("devin-http", "loop-guard", { action: "fail", reason: guardAction.reason });
+    emit({
+      type: "error",
+      message: guardAction.message,
+      status: 400,
+      errorType: "invalid_request_error",
+      code: "loop_guard",
+      retryable: false,
+    });
+    return;
+  }
+  const replayMessages = guardAction.kind === "steer"
+    ? [
+      ...parsed.context.messages,
+      { role: "user" as const, content: guardAction.message, timestamp: Date.now() },
+    ]
+    : parsed.context.messages;
+  if (guardAction.kind === "steer") {
+    debugProviderDiagnostic("devin-http", "loop-guard", { action: "steer", reason: guardAction.reason });
+  }
+
+  // Image prep (images.ts): the upstream nginx caps the whole protobuf body at ~14 MB
+  // and every turn replays all history, so one oversized screenshot would 413 every
+  // subsequent request. Normalize BEFORE projection; fail-open — a broken pipeline
+  // must degrade to the old behavior, never fail the turn.
+  let preparedMessages = replayMessages;
+  try {
+    preparedMessages = await prepareDevinImages(replayMessages);
+  } catch (error) {
+    debugProviderDiagnostic("devin-http", "image-prepare-failed", { error: errorMessage(error) });
+  }
 
   // Terminal-event discipline: exactly one terminal frame per turn, whichever path reaches it
   // first. The upstream can deliver an end-stream error after content, and the wall clock can fire
@@ -431,9 +527,17 @@ export async function runDevinHttpTurn(
   let usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number } | undefined;
   let stopReason: number = StopReason.UNSPECIFIED;
   let emittedToolCall = false;
-  // Flips on the first text or tool-call delta. Anything thinking-shaped after that point is
-  // trailing scratch (see the delta case above) and must not enter the item stream.
+  // Intra-turn flood cap: named calls only (argument fragments carry no identity). Observed
+  // runaway: 12k+ frames in a single turn.
+  let namedToolCallsThisTurn = 0;
+  const maxToolCallsPerTurn = deps.maxToolCallsPerTurn ?? LOOP_GUARD_MAX_TOOL_CALLS_PER_TURN;
+  // Flips on the first text or tool-call delta. Trailing thinking AFTER TEXT is swallowed (it
+  // would open a reasoning item on top of a message). Trailing thinking after a tool-call-only
+  // turn is buffered and flushed at end-of-turn, once every call is closed.
   let answerStarted = false;
+  let textEmitted = false;
+  let trailingThinking = "";
+  let trailingSignature = "";
 
   /**
    * Tool-call assembly state.
@@ -443,7 +547,7 @@ export async function runDevinHttpTurn(
    * calls already announced so a fragment lands on the right one, and a new id closes whatever was
    * open before it.
    */
-  const openToolCalls = new Map<string, { emittedEnd: boolean }>();
+  const openToolCalls = new Map<string, { emittedEnd: boolean; name: string; args: string }>();
   let currentToolCallId: string | undefined;
 
   const openToolCall = (id: string, name: string, initialArguments: string): void => {
@@ -451,7 +555,7 @@ export async function runDevinHttpTurn(
     // seeing an id again would be a duplicate rather than a continuation.
     emittedToolCall = true;
     emit({ type: "tool_call_start", id, name });
-    openToolCalls.set(id, { emittedEnd: false });
+    openToolCalls.set(id, { emittedEnd: false, name, args: initialArguments });
     currentToolCallId = id;
     if (initialArguments) emit({ type: "tool_call_delta", arguments: initialArguments });
   };
@@ -468,6 +572,18 @@ export async function runDevinHttpTurn(
     for (const id of openToolCalls.keys()) closeToolCall(id);
   };
 
+  const flushTrailingThinking = (): void => {
+    if (textEmitted || (!trailingThinking && !trailingSignature)) {
+      trailingThinking = "";
+      trailingSignature = "";
+      return;
+    }
+    if (trailingThinking) emit({ type: "thinking_delta", thinking: trailingThinking });
+    if (trailingSignature) emit({ type: "thinking_signature", signature: trailingSignature });
+    trailingThinking = "";
+    trailingSignature = "";
+  };
+
   // Only a non-zero usage frame carries real numbers; every earlier frame is zeroed. Keeping the
   // last NON-ZERO frame is the difference between reporting real tokens and reporting zero.
   const recordUsage = (frame: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }): void => {
@@ -478,43 +594,82 @@ export async function runDevinHttpTurn(
   try {
     const auth = await fetchUserJwt(token, deps, provider.baseUrl || DEVIN_CASCADE_BASE_URL, incoming.abortSignal);
 
-    const events = streamDevinChat({
-      apiKey: token,
-      userJwt: auth.userJwt,
-      baseUrl: auth.baseUrl,
-      modelUid,
-      systemPrompt: collectSystemPrompt(parsed),
-      request: {
-        chatMessagePrompts: projectDevinPrompts(parsed.context.messages, cascadeId),
-        configuration: toCompletionConfiguration(parsed),
-        tools: toDevinToolDefinitions(parsed.context.tools, parsed.options.toolChoice),
-        disableParallelToolCalls: parsed.options.parallelToolCalls === false,
-        toolChoice: toDevinToolChoice(parsed.options.toolChoice, parsed.context.tools),
-        cascadeId,
-        executionId,
-      },
-      ...(incoming.abortSignal ? { signal: incoming.abortSignal } : {}),
-    }, deps);
+    // Attempt loop: a mid-stream stall aborts the generation and issues a continuation request
+    // carrying the partial output plus a continue prompt — the automated form of the client's
+    // Continue button. Bounded by the per-turn continuation cap and the conversation's stall
+    // budget inside the guard.
+    let attemptMessages = preparedMessages;
+    let continuations = 0;
+    const maxContinuations = deps.maxContinuationsPerTurn ?? LOOP_GUARD_MAX_CONTINUATIONS_PER_TURN;
+    // Partial output of the current attempt, replayed on a continuation so the model resumes
+    // where it stopped instead of restarting the turn.
+    let attemptText = "";
 
-    for await (const event of events) {
+    attemptLoop: for (;;) {
+      // Per-attempt state: each generation gets a fresh flood budget and a clean repetition
+      // window. Turn-level flags (answerStarted, textEmitted, emittedToolCall) persist.
+      namedToolCallsThisTurn = 0;
+      trailingThinking = "";
+      trailingSignature = "";
+      openToolCalls.clear();
+      currentToolCallId = undefined;
+      attemptText = "";
+      loopGuard.resetStreamState();
+      let stalledReason: LoopGuardReason | null = null;
+      let stalledMessage = "";
+
+      const events = streamDevinChat({
+        apiKey: token,
+        userJwt: auth.userJwt,
+        baseUrl: auth.baseUrl,
+        modelUid,
+        systemPrompt: collectSystemPrompt(parsed),
+        request: {
+          chatMessagePrompts: projectDevinPrompts(attemptMessages, session.cascadeId),
+          configuration: toCompletionConfiguration(parsed),
+          tools: toDevinToolDefinitions(parsed.context.tools, parsed.options.toolChoice),
+          disableParallelToolCalls: parsed.options.parallelToolCalls === false,
+          toolChoice: toDevinToolChoice(parsed.options.toolChoice, parsed.context.tools),
+          cascadeId: session.cascadeId,
+          executionId: session.executionId,
+          modelConfig: { id: session.modelConfigId, turn: session.turn },
+          // Explicit cache-affinity key (#27), mirroring the real client's language server: the
+          // stable conversation id pins the prompt cache so a large tool result does not silently
+          // evict the prefix mid-session.
+          promptCacheKey: session.cascadeId,
+        },
+        ...(incoming.abortSignal ? { signal: incoming.abortSignal } : {}),
+      }, deps);
+
+      streamLoop: for await (const event of events) {
       switch (event.type) {
         case "delta": {
-          // Cascade can deliver the thinking block AFTER the answer text (observed on swe-2: it is
-          // the model's forward-planning scratch, not a preamble). The Responses envelope requires
-          // reasoning to precede the message it informs, and the bridge opens items in first-touch
-          // order, so emitting trailing thinking would open a second item at the message's output
-          // index and the chat-completions translator rejects the resulting stream. Forward only
-          // leading thinking; swallow whatever trails the answer.
+          // Repetition fuse on the live stream: a model restating one paragraph verbatim is a
+          // loop the request-time checks cannot see. Abort and continue on a fresh request.
+          const repetition = loopGuard.noteStreamText("thinking", event.thinking)
+            ?? loopGuard.noteStreamText("text", event.text);
+          if (repetition) {
+            stalledReason = repetition;
+            break streamLoop;
+          }
+          // Cascade can deliver thinking AFTER the answer (observed on swe-2: forward-planning
+          // scratch, not a preamble). After TEXT that would open a reasoning item on top of a
+          // message and the chat-completions translator rejects the stream — swallow it. After a
+          // tool-call-only turn there is no message item, so the scratch is buffered and flushed
+          // once every call is closed (see flushTrailingThinking).
           if (!answerStarted) {
-            if (event.thinking) {
-              emit({ type: "thinking_delta", thinking: event.thinking });
-            }
-            if (event.thinkingSignature) {
-              emit({ type: "thinking_signature", signature: event.thinkingSignature });
-            }
+            if (event.thinking) emit({ type: "thinking_delta", thinking: event.thinking });
+            if (event.thinkingSignature) emit({ type: "thinking_signature", signature: event.thinkingSignature });
+          } else if (!textEmitted) {
+            if (event.thinking) trailingThinking += event.thinking;
+            if (event.thinkingSignature) trailingSignature = event.thinkingSignature;
           }
           if (event.text) {
             answerStarted = true;
+            textEmitted = true;
+            trailingThinking = "";
+            trailingSignature = "";
+            attemptText += event.text;
             emit({ type: "text_delta", text: event.text });
           }
           break;
@@ -527,6 +682,11 @@ export async function runDevinHttpTurn(
           for (const call of event.calls) {
             const hasIdentity = Boolean(call.id || call.name);
             if (hasIdentity) {
+              namedToolCallsThisTurn++;
+              if (namedToolCallsThisTurn > maxToolCallsPerTurn) {
+                stalledReason = "tool-call-flood";
+                break streamLoop;
+              }
               // A new call implicitly terminates the previous one, because the server never
               // interleaves two calls' fragments: each call's arguments complete before the next id.
               if (currentToolCallId) closeToolCall(currentToolCallId);
@@ -538,7 +698,11 @@ export async function runDevinHttpTurn(
             } else if (call.argumentsJson) {
               // Fragment: append to whatever call is open. With nothing open the frame is
               // unparseable, so it is dropped rather than attached to the wrong call.
-              if (currentToolCallId) emit({ type: "tool_call_delta", arguments: call.argumentsJson });
+              if (currentToolCallId) {
+                const open = openToolCalls.get(currentToolCallId);
+                if (open) open.args += call.argumentsJson;
+                emit({ type: "tool_call_delta", arguments: call.argumentsJson });
+              }
             }
           }
           if (event.calls.length > 0) {
@@ -574,24 +738,93 @@ export async function runDevinHttpTurn(
           return;
         }
         case "protocolError": {
-          emitOnce({
-            type: "error",
-            message: event.message,
-            status: 504,
-            errorType: "upstream_error",
-            code: "timeout",
-            retryable: true,
-            ...(usage ? { usage: toOcxUsage(usage) } : {}),
-          });
-          return;
+          // Upstream silence is a stall, not a verdict: continue on a fresh request carrying
+          // whatever was already produced. A stream that never produced anything retries the
+          // identical request. The continuation/stall budgets bound it; exhaustion surfaces the
+          // original timeout error below.
+          stalledReason = "upstream-silent";
+          stalledMessage = event.message;
+          break streamLoop;
         }
         case "done":
           break;
       }
+      }
+
+      if (stalledReason) {
+        closeAllToolCalls();
+        const decision = loopGuard.noteStreamStall(stalledReason);
+        debugProviderDiagnostic("devin-http", "loop-guard", {
+          action: decision.kind,
+          reason: stalledReason,
+          continuation: continuations,
+        });
+        if (decision.kind === "fail" || continuations >= maxContinuations) {
+          // A silent upstream keeps its own error shape — the stall was transport, not looping.
+          emitOnce(stalledReason === "upstream-silent"
+            ? {
+              type: "error",
+              message: stalledMessage || "Devin stream went silent.",
+              status: 504,
+              errorType: "upstream_error",
+              code: "timeout",
+              retryable: true,
+              ...(usage ? { usage: toOcxUsage(usage) } : {}),
+            }
+            : {
+              type: "error",
+              message: decision.kind === "fail"
+                ? decision.message
+                : `Devin loop guard: generation stalled ${continuations + 1} times in one turn (${stalledReason}); the continuation budget is exhausted.`,
+              status: 400,
+              errorType: "invalid_request_error",
+              code: "loop_guard",
+              retryable: false,
+            });
+          return;
+        }
+        continuations++;
+        // Replay the aborted generation as a partial assistant turn — text and the calls already
+        // announced, no thinking — then the continue prompt. The model resumes mid-turn instead
+        // of the client seeing an error.
+        const partial: OcxMessage[] = [];
+        const partialCalls = [...openToolCalls.entries()].map(([id, call]) => ({
+          type: "toolCall" as const,
+          id,
+          name: call.name,
+          arguments: parseToolArguments(call.args),
+        }));
+        if (attemptText || partialCalls.length > 0) {
+          partial.push({
+            role: "assistant",
+            content: [
+              ...(attemptText ? [{ type: "text" as const, text: attemptText }] : []),
+              ...partialCalls,
+            ],
+            timestamp: Date.now(),
+          });
+        }
+        // A silent stream that produced nothing retries the identical request — there is no
+        // partial turn to resume and "you were cut off" would be a lie.
+        const silentRetry = stalledReason === "upstream-silent" && partial.length === 0;
+        attemptMessages = silentRetry
+          ? attemptMessages
+          : [
+            ...attemptMessages,
+            ...partial,
+            { role: "user", content: decision.message, timestamp: Date.now() },
+          ];
+        continue attemptLoop;
+      }
+      break attemptLoop;
     }
 
     // A stream that ends without an explicit stop frame still needs its calls closed.
     closeAllToolCalls();
+    flushTrailingThinking();
+    // Only a cleanly completed turn feeds the empty-streak budget; upstream errors and client
+    // aborts are not the model looping.
+    loopGuard.recordOutcome(textEmitted || emittedToolCall);
     emitOnce({
       type: "done",
       stopReason: stopReasonToDevinStopReason(stopReason, emittedToolCall),
@@ -636,6 +869,17 @@ export async function runDevinHttpTurn(
     clearTimeout(timeoutTimer);
     incoming.abortSignal?.removeEventListener("abort", onAbort);
   }
+}
+
+/** Arguments arrive as a JSON string on the wire; a truncated fragment may not parse. */
+function parseToolArguments(argumentsJson: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(argumentsJson) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+  } catch {
+    /* truncated or malformed — replay as empty arguments rather than dropping the call */
+  }
+  return {};
 }
 
 function toOcxUsage(usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }) {

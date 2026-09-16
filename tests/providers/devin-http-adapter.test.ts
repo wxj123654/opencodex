@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, test } from "bun:test";
 import { gzipSync } from "node:zlib";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -17,6 +17,7 @@ import {
 import { resolveDevinToken, normalizeDevinToken, readDevinCredentialFile, devinCredentialFileCandidates, DevinMissingCredentialError } from "../../src/adapters/devin-http/credentials";
 import { buildDevinMetadata, streamDevinChat } from "../../src/adapters/devin-http/client";
 import { encodeConnectFrame } from "../../src/adapters/connect-framing";
+import { resetDevinLoopGuard } from "../../src/adapters/devin-http/loop-fuse";
 import { ProtoDecoder, ProtoEncoder, StopReason } from "../../src/adapters/devin-http/proto";
 
 /** Decode a length-delimited field as UTF-8; throws when the field is missing. */
@@ -247,14 +248,56 @@ describe("devin-http request projection", () => {
     expect(prompts[0]!.source).toBe(1); // USER
   });
 
-  test("assistant turns replay as SYSTEM, which is the API's only option for model output", () => {
+  test("assistant turns replay as ASSISTANT (wire value 2)", () => {
     const prompts = projectDevinPrompts([
       { role: "user", content: "q", timestamp: 0 },
       { role: "assistant", content: [{ type: "text", text: "a" }], timestamp: 0 },
     ], "cascade-1");
-    expect(prompts[1]!.source).toBe(2); // SYSTEM
+    expect(prompts[1]!.source).toBe(2); // ASSISTANT — the observed client source for model output
     expect(prompts[1]!.messageId.startsWith("bot-")).toBe(true);
     expect(prompts[1]!.prompt).toBe("a");
+  });
+
+  test("empty assistant turns (no text, no tool calls, no thinking) are dropped", () => {
+    const prompts = projectDevinPrompts([
+      { role: "user", content: "q", timestamp: 0 },
+      { role: "assistant", content: [], timestamp: 0 },
+      { role: "assistant", content: [{ type: "text", text: "   " }], timestamp: 0 },
+      { role: "user", content: "again", timestamp: 0 },
+    ], "cascade-1");
+    expect(prompts.map(p => p.source)).toEqual([1, 1]);
+    expect(prompts.map(p => p.prompt)).toEqual(["q", "again"]);
+  });
+
+  test("a thinking-only assistant turn is kept so reasoning can replay", () => {
+    const prompts = projectDevinPrompts([
+      { role: "assistant", content: [{ type: "thinking", thinking: "plan" }], timestamp: 0 },
+    ], "cascade-1");
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]!.thinking).toBe("plan");
+    expect(prompts[0]!.prompt).toBe("");
+  });
+
+  test("thinking signatures replay on #12 when they are not parser-synthetic JSON", () => {
+    const prompts = projectDevinPrompts([
+      { role: "assistant", content: [
+        { type: "thinking", thinking: "plan", signature: "sig-from-devin" },
+        { type: "text", text: "ok" },
+      ], timestamp: 0 },
+    ], "cascade-1");
+    expect(prompts[0]!.signature).toBe("sig-from-devin");
+  });
+
+  test("parser-synthetic JSON signatures are not forwarded as Devin thinking signatures", () => {
+    const synthetic = JSON.stringify({ type: "reasoning", content: [{ type: "reasoning_text", text: "plan" }] });
+    const prompts = projectDevinPrompts([
+      { role: "assistant", content: [
+        { type: "thinking", thinking: "plan", signature: synthetic },
+        { type: "text", text: "ok" },
+      ], timestamp: 0 },
+    ], "cascade-1");
+    expect(prompts[0]!.thinking).toBe("plan");
+    expect(prompts[0]!.signature).toBeUndefined();
   });
 
   test("assistant tool calls replay with their arguments as a JSON string", () => {
@@ -394,6 +437,10 @@ describe("devin-http stop reason mapping", () => {
 });
 
 describe("devin-http turn event mapping", () => {
+  // The loop guard keeps per-conversation state across turns; every test below replays
+  // the same cascadeId, so without a reset later tests inherit earlier streaks.
+  beforeEach(() => resetDevinLoopGuard());
+
   test("text and thinking deltas stream through as separate events", async () => {
     const events = await runTurn(request(), [
       chatResponseFrame(e => e.string(9, "think")),
@@ -426,6 +473,32 @@ describe("devin-http turn event mapping", () => {
     expect(events.filter(e => e.type === "thinking_signature")).toHaveLength(0);
     expect(events.filter(e => e.type === "text_delta")).toEqual([{ type: "text_delta", text: "pong" }]);
     expect(events.at(-1)!.type).toBe("done");
+  });
+
+  test("trailing thinking after a tool-call-only turn is flushed so the next replay can see it", async () => {
+    // Agent-loop turns have no answer text. Trailing thinking after the tool call is the model's
+    // forward-planning scratch; swallowing it is what made long loops look like they never thought.
+    // Flushing at end-of-turn (after the call is closed) does not open a reasoning item on top of
+    // a message, which is the sequence the chat-completions translator rejects.
+    const events = await runTurn(request(), [
+      chatResponseFrame(e => e.message(6, sub => {
+        sub.string(1, "functions.bash:0");
+        sub.string(2, "bash");
+        sub.string(3, "{}");
+      })),
+      chatResponseFrame(e => { e.string(9, "next I will read the file"); e.string(10, "sig-trail"); }),
+      chatResponseFrame(e => e.uint32(5, StopReason.FUNCTION_CALL)),
+    ]);
+    expect(events.filter(e => e.type === "thinking_delta")).toEqual([
+      { type: "thinking_delta", thinking: "next I will read the file" },
+    ]);
+    expect(events.filter(e => e.type === "thinking_signature")).toEqual([
+      { type: "thinking_signature", signature: "sig-trail" },
+    ]);
+    const types = events.map(e => e.type);
+    expect(types.indexOf("tool_call_end")).toBeLessThan(types.indexOf("thinking_delta"));
+    expect(types.indexOf("thinking_delta")).toBeLessThan(types.lastIndexOf("done"));
+    expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "tool_calls" });
   });
 
   test("leading thinking before any text still streams through", async () => {

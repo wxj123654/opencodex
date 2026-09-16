@@ -37,6 +37,23 @@ export {
   toDevinToolDefinitions,
   type DevinHttpTurnDeps,
 } from "./devin-http/turn";
+export {
+  DEVIN_IMAGE_BASE64_BUDGET,
+  prepareDevinImages,
+} from "./devin-http/images";
+export {
+  detectToolCallStreak,
+  DevinLoopGuard,
+  LOOP_FUSE_STREAK,
+  LOOP_GUARD_EMPTY_FAIL,
+  LOOP_GUARD_EMPTY_STEER,
+  LOOP_GUARD_FUSE_TRIPS_FAIL,
+  LOOP_GUARD_MAX_TOOL_CALLS_PER_TURN,
+  loopFuseSteeringMessage,
+  resetDevinLoopGuard,
+  type DevinLoopGuardDeps,
+  type LoopGuardAction,
+} from "./devin-http/loop-fuse";
 
 /**
  * Devin/Cascade adapter over the vendor's own Connect API (direct HTTP, no CLI).

@@ -95,6 +95,19 @@ function userContentToBlocks(content: unknown): Rec[] {
   return blocks;
 }
 
+/**
+ * A Chat Completions client that received `delta.reasoning_content` replays it on the
+ * assistant turn (DeepSeek-style `reasoning_content`, or the `reasoning` string spelling).
+ * Dropping it here made every downstream provider see a history in which the model never
+ * thought — for devin-http that meant the #11 thinking replay was always empty, so a long
+ * agent loop re-sent the model its own turns with the reasoning stripped every time.
+ */
+function assistantReasoningText(msg: Rec): string {
+  if (typeof msg.reasoning_content === "string" && msg.reasoning_content.length > 0) return msg.reasoning_content;
+  if (typeof msg.reasoning === "string" && msg.reasoning.length > 0) return msg.reasoning;
+  return "";
+}
+
 function assistantContentToBlocks(content: unknown): Rec[] {
   if (typeof content === "string") {
     return content.length > 0 ? [{ type: "output_text", text: content }] : [];
@@ -282,7 +295,15 @@ export function chatCompletionsToResponsesBody(raw: unknown): Rec {
         break;
       }
       case "assistant": {
+        // The reasoning item PRECEDES the message: the Responses parser attributes pending
+        // reasoning to the following assistant turn, so this order is what makes the thinking
+        // land inside that turn (as an OcxThinkingContent part) rather than getting dropped at
+        // the turn boundary.
         const blocks = assistantContentToBlocks(msg.content);
+        const reasoningText = assistantReasoningText(msg);
+        if (reasoningText && (blocks.length > 0 || msg.tool_calls !== undefined)) {
+          input.push({ type: "reasoning", content: [{ type: "reasoning_text", text: reasoningText }] });
+        }
         if (blocks.length > 0) input.push({ type: "message", role: "assistant", content: blocks });
         if (msg.tool_calls !== undefined) toolCallsToItems(msg.tool_calls, input, knownNameByCallId);
         break;

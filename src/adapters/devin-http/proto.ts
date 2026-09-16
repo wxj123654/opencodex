@@ -198,11 +198,13 @@ export class ProtoDecoder {
 
 // ─── Enums (proto3 numeric values) ──────────────────────────────────────────
 
-/** `ChatMessagePrompt.source`. */
+/** `ChatMessagePrompt.source`. Wire values match the observed client (`USER=1`, `ASSISTANT=2`, `TOOL=4`). */
 export const ChatMessageSource = {
   UNSPECIFIED: 0,
   USER: 1,
-  /** Assistant turns are replayed as SYSTEM — the API has no ASSISTANT source. */
+  /** The model's own prior output. The observed client (and WindsurfAPI) call this ASSISTANT. */
+  ASSISTANT: 2,
+  /** @deprecated Wire value 2 is ASSISTANT; kept so existing imports keep compiling. */
   SYSTEM: 2,
   UNKNOWN: 3,
   TOOL: 4,
@@ -454,6 +456,25 @@ function encodePromptCacheOptions(e: ProtoEncoder, type: number): void {
 
 // ─── GetChatMessage: the streaming chat RPC ─────────────────────────────────
 
+/**
+ * `ModelConfig` (`#15`), calibrated from a live 9-request capture of the real client: `#15.1` is a
+ * stable per-conversation config uuid, `#15.2` a monotonic per-conversation turn counter (observed
+ * 1..8 across the capture), and `#15.3` the constant 4 whose meaning the capture does not reveal.
+ */
+export interface ModelConfig {
+  id: string;
+  turn: number;
+}
+
+/** `#15.3` — constant on every observed request; semantics unknown, presence required. */
+export const MODEL_CONFIG_FIELD_3 = 4;
+
+function encodeModelConfig(e: ProtoEncoder, c: ModelConfig): void {
+  e.string(1, c.id);
+  e.uint32(2, c.turn);
+  e.uint32(3, MODEL_CONFIG_FIELD_3);
+}
+
 export interface GetChatMessageRequest {
   metadata: Metadata;
   /** The system prompt. Separate from `chatMessagePrompts`. */
@@ -466,11 +487,26 @@ export interface GetChatMessageRequest {
   disableParallelToolCalls: boolean;
   toolChoice: ChatToolChoice;
   /**
-   * Conversation identity. Reusing one across turns gives the server the continuity it needs to
-   * keep the prompt cache warm; a fresh UUID makes the turn stateless.
+   * Conversation identity (`#16`), stable across one conversation (see `session-identity.ts`).
+   * The observed client reuses one session id for a whole multi-turn conversation; minting a
+   * fresh uuid per request makes the upstream velocity limiter read one agent loop as N
+   * brand-new sessions.
    */
   cascadeId: string;
+  /**
+   * `#22` request id: rotated per user exchange, shared across that exchange's tool loop, and
+   * ABSENT on a conversation's first turn. An empty string encodes to an absent field.
+   */
   executionId: string;
+  /** `#15` — stable config id plus the conversation's monotonic turn counter. */
+  modelConfig?: ModelConfig;
+  /**
+   * `#27 prompt_cache_key` — an explicit cache-affinity key, observed on the real client's
+   * language server (which also runs a `SystemPromptCacher`). Sending the conversation's stable
+   * cascadeId here asks the server to pin this conversation's prompt cache instead of relying on
+   * prefix matching alone, which large tool-result blocks were observed to evict mid-session.
+   */
+  promptCacheKey?: string;
 }
 
 export function encodeGetChatMessageRequest(r: GetChatMessageRequest): Uint8Array {
@@ -487,7 +523,12 @@ export function encodeGetChatMessageRequest(r: GetChatMessageRequest): Uint8Arra
   // Always on: every turn asks the server to cache its prefix. There is no downside when the
   // prefix is not reusable, and it is the difference between a cached and uncached replay.
   enc.message(13, e => encodePromptCacheOptions(e, CacheControlType.EPHEMERAL));
+  if (r.modelConfig) {
+    const modelConfig = r.modelConfig;
+    enc.message(15, e => encodeModelConfig(e, modelConfig));
+  }
   enc.string(16, r.cascadeId);
+  enc.string(27, r.promptCacheKey);
   enc.uint32(20, ConversationalPlannerMode.DEFAULT);
   enc.string(22, r.executionId);
   return enc.finish();
