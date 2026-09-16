@@ -24,6 +24,7 @@ const EXPECTED_ADAPTER_NAMES = {
   "mimo-free": "mimo-free",
   qoder: "qoder",
   "devin-http": "devin-http",
+  "windsurf-api": "windsurf-api",
 } as const;
 
 function provider(adapter: string): OcxProviderConfig {

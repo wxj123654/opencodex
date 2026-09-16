@@ -871,6 +871,40 @@ Use `devin` when the requirement is "Devin must not be able to act on this machi
 - **Dashboard:** no vendor brand asset is committed, so the providers overview shows the default
   initial tile.
 
+### WindsurfAPI reverse proxy
+
+`windsurf-api` is a third-party OpenAI Chat Completions compatible relay in front of the
+Windsurf/Cascade model roster. Like `devin-http`, the reasoning effort is baked into the wire
+model id (`claude-opus-5-high`, `gpt-5-6-sol-none-priority`), so the adapter folds the roster
+into selectable models with per-model effort ladders and rewrites the request's `model` field
+to the exact wire id — no `reasoning_effort` field is sent.
+
+```json
+{
+  "providers": {
+    "windsurf-api": {
+      "adapter": "windsurf-api",
+      "authMode": "key",
+      "baseUrl": "http://101.43.72.126:3003/v1",
+      "apiKey": "${WINDSURF_API_KEY}"
+    }
+  }
+}
+```
+
+- **Model roster:** the selectable ids fold the ~158 wire ids the endpoint advertises. Effort
+  rungs become the picker ladder (`claude-opus-5` offers `low`/`medium`/`high`/`xhigh`/`max`),
+  while serving-tier and variant axes (`-fast`, `-priority`, `-lightning`, `-1m`, `-thinking`)
+  stay in the selectable id because they are different models upstream. Legacy `MODEL_*` uids
+  are folded to friendly names where the roster label is unambiguous (`gpt-5.1`, `gpt-4.1`,
+  `claude-sonnet-4.5`).
+- **Defaults:** a family that ships a bare uid (`gpt-5.5`, `swe-1-7`) uses it when no effort is
+  selected; families without one (`swe-2`, `claude-opus-5`) fall back to the first rung in
+  roster order.
+- **Trust note:** this is an unofficial third-party relay, not a Cognition/Windsurf endpoint.
+  Requests — including full conversation history and any attached images — go to the relay
+  operator. Treat it with the same caution as any unaffiliated gateway.
+
 ### A6API credit quota
 
 A custom `openai-chat` provider using `authMode: "key"` and the canonical

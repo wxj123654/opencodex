@@ -1141,6 +1141,7 @@
   "windows-tray.test.ts": "windows",
   "windows-user-principal-nonascii.test.ts": "windows",
   "windows-user-principal.test.ts": "windows",
+  "windsurf-api-adapter.test.ts": "providers",
   "winsw-stop-hardening.test.ts": "windows",
   "winsw.test.ts": "service",
   "ws-endpoint.test.ts": "responses",

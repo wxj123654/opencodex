@@ -45,6 +45,14 @@ import {
   DEVIN_HTTP_MODEL_INPUT_MODALITIES,
   DEVIN_HTTP_MODEL_REASONING_EFFORTS,
 } from "./devin-http-models";
+import {
+  WINDSURF_API_MODEL_CONTEXT_WINDOWS,
+  WINDSURF_API_MODEL_DEFAULT_REASONING_EFFORTS,
+  WINDSURF_API_MODEL_DISPLAY_NAMES,
+  WINDSURF_API_MODEL_INPUT_MODALITIES,
+  WINDSURF_API_MODEL_REASONING_EFFORTS,
+  WINDSURF_API_MODELS,
+} from "./windsurf-api-models";
 
 export type ProviderAuthKind = "forward" | "oauth" | "key" | "local";
 export type MetadataModelIdNormalize = "case-insensitive";
@@ -3486,6 +3494,31 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     modelReasoningEfforts: DEVIN_HTTP_MODEL_REASONING_EFFORTS,
     modelDefaultReasoningEfforts: DEVIN_HTTP_MODEL_DEFAULT_REASONING_EFFORTS,
     note: "Calls Cognition's Cascade backend directly over connectrpc/protobuf — the same service the Devin CLI uses, without the CLI. Requires Devin credentials: either an explicit provider key or an existing `devin auth login` (~/.local/share/devin/credentials.toml). This is a full model contract: Codex's tools are sent to the model and its tool calls come back for Codex to run. Model roster is entitlement-aware (74 selectable ids folded from ~209 roster variants); the static seed is a fallback. The wire is reverse-engineered and undocumented.",
+  },
+  {
+    // WindsurfAPI reverse proxy: an OpenAI Chat Completions compatible relay in front of the
+    // Windsurf/Cascade model roster. Like devin-http, the reasoning effort is baked into the
+    // wire model id (`claude-opus-5-high`, `gpt-5-6-sol-none-priority`), so the adapter folds
+    // the roster into selectable ids + per-model effort ladders and rewrites `body.model` to
+    // the exact wire id (src/adapters/windsurf-api.ts). Verified live on 2026-09-16:
+    // GET /v1/models returns 158 ids; POST /v1/chat/completions answers a standard request.
+    id: "windsurf-api",
+    label: "WindsurfAPI (Reverse Proxy)",
+    adapter: "windsurf-api",
+    baseUrl: "http://101.43.72.126:3003/v1",
+    authKind: "key",
+    apiKeyValidation: "unknown",
+    preserveCustomDestination: true,
+    dashboardUrl: "http://101.43.72.126:3003/",
+    defaultModel: "claude-sonnet-4-6",
+    models: [...WINDSURF_API_MODELS],
+    liveModels: false,
+    modelContextWindows: WINDSURF_API_MODEL_CONTEXT_WINDOWS,
+    modelInputModalities: WINDSURF_API_MODEL_INPUT_MODALITIES,
+    modelDisplayNames: WINDSURF_API_MODEL_DISPLAY_NAMES,
+    modelReasoningEfforts: WINDSURF_API_MODEL_REASONING_EFFORTS,
+    modelDefaultReasoningEfforts: WINDSURF_API_MODEL_DEFAULT_REASONING_EFFORTS,
+    note: "Third-party WindsurfAPI reverse proxy (OpenAI Chat Completions compatible). Reasoning effort is encoded in the wire model id, not a reasoning_effort field: the adapter folds the 158-id roster into selectable models with per-model effort ladders and rewrites the request's model field to the exact wire id. Speed axes (-fast/-priority/-lightning/-1m/-thinking) stay in the selectable id, matching the devin-http fold.",
   },
 ];
 

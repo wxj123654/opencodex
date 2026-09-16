@@ -11,6 +11,7 @@ import { createGoogleAdapter } from "./google";
 import { createKiroAdapter } from "./kiro";
 import { createMimoFreeAdapter } from "./mimo-free";
 import { createOpenAIChatAdapter } from "./openai-chat";
+import { createWindsurfApiAdapter } from "./windsurf-api";
 import { createOllamaNativeAdapter } from "./ollama-native";
 import { createResponsesPassthroughAdapter } from "./openai-responses";
 import type { OcxProviderConfig } from "../types";
@@ -126,6 +127,10 @@ export const ADAPTER_REGISTRY = {
     wire: "devin-http",
     mutation: "codex-owned",
     create: (provider: OcxProviderConfig, _context: AdapterFactoryContext) => createDevinHttpAdapter(provider),
+  },
+  "windsurf-api": {
+    contractParent: "openai-chat",
+    create: (provider: OcxProviderConfig, _context: AdapterFactoryContext) => createWindsurfApiAdapter(provider),
   },
 } as const satisfies Record<string, AdapterDefinition>;
 
