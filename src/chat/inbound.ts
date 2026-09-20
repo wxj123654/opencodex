@@ -6,6 +6,8 @@
  * responsesRequestSchema so routing/OAuth/pool/sidecars are inherited unchanged.
  */
 import { createHash } from "node:crypto";
+import { chatImageUrlFromPart } from "./image-parts";
+import { untranslatedChatInputMedia, untranslatedInputMediaMessage } from "../responses/input-media";
 
 export class ChatCompletionsRequestError extends Error {}
 
@@ -27,7 +29,12 @@ export function assertChatCompletionsRoutingBody(raw: unknown): asserts raw is C
   }
 }
 
-const OUTPUT_CONFIG_EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
+// "none" is the runtime's disable sentinel, not an unknown value: src/reasoning-effort.ts
+// accepts it and maps it to "omit the reasoning parameter", and the Pi client export maps
+// Pi's "off" thinking level onto it (src/clients/config-export.ts). Dropping it here let a
+// provider default re-enable thinking the caller had explicitly turned off — and for the
+// Anthropic families that think by default, omission is not the same as disabled.
+const OUTPUT_CONFIG_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
 const OUTPUT_CONFIG_SUMMARIES = new Set(["auto", "concise", "detailed", "none"]);
 
 function contentToText(content: unknown): string {
@@ -47,13 +54,9 @@ function contentToText(content: unknown): string {
   return parts.join("\n");
 }
 
-function imageUrlFromPart(part: Rec): string | null {
-  if (part.type !== "image_url") return null;
-  const imageUrl = part.image_url;
-  if (typeof imageUrl === "string" && imageUrl.length > 0) return imageUrl;
-  if (isRec(imageUrl) && typeof imageUrl.url === "string" && imageUrl.url.length > 0) return imageUrl.url;
-  return null;
-}
+// Recognition moved to src/chat/image-parts.ts so the native fast path's
+// route-eligibility predicate and this translator cannot drift apart again.
+const imageUrlFromPart = chatImageUrlFromPart;
 
 function videoUrlFromPart(part: Rec): string | null {
   if (part.type !== "video_url") return null;
@@ -96,16 +99,35 @@ function userContentToBlocks(content: unknown): Rec[] {
 }
 
 /**
- * A Chat Completions client that received `delta.reasoning_content` replays it on the
- * assistant turn (DeepSeek-style `reasoning_content`, or the `reasoning` string spelling).
- * Dropping it here made every downstream provider see a history in which the model never
- * thought — for devin-http that meant the #11 thinking replay was always empty, so a long
- * agent loop re-sent the model its own turns with the reasoning stripped every time.
+ * The assistant's prior thinking, as plaintext, from either Chat spelling.
+ *
+ * The outbound direction already reconstructs these for providers listed in
+ * `preserveReasoningContentModels` (src/adapters/openai-chat.ts), so a client
+ * replaying a turn sends them back. Dropping them here made the round trip lossy and
+ * left interleaved-thinking providers seeing a bare continuation — for devin-http the
+ * thinking replay was always empty, so a long agent loop re-sent the model its own
+ * turns with the reasoning stripped every time.
+ *
+ * Only representable plaintext is read. No signature, encrypted payload or
+ * provider-issued item id is reconstructed — see the reasoning item built below.
  */
-function assistantReasoningText(msg: Rec): string {
-  if (typeof msg.reasoning_content === "string" && msg.reasoning_content.length > 0) return msg.reasoning_content;
-  if (typeof msg.reasoning === "string" && msg.reasoning.length > 0) return msg.reasoning;
-  return "";
+function assistantReasoningText(msg: Rec): string | undefined {
+  if (typeof msg.reasoning_content === "string" && msg.reasoning_content.length > 0) {
+    return msg.reasoning_content;
+  }
+  // Some Chat clients (and the devin-http thinking replay) use the bare `reasoning`
+  // string spelling where DeepSeek-style clients send `reasoning_content`.
+  if (typeof msg.reasoning === "string" && msg.reasoning.length > 0) {
+    return msg.reasoning;
+  }
+  if (Array.isArray(msg.reasoning_details)) {
+    const segments: string[] = [];
+    for (const raw of msg.reasoning_details) {
+      if (isRec(raw) && typeof raw.text === "string" && raw.text.length > 0) segments.push(raw.text);
+    }
+    if (segments.length > 0) return segments.join("");
+  }
+  return undefined;
 }
 
 function assistantContentToBlocks(content: unknown): Rec[] {
@@ -274,6 +296,13 @@ function canonicalJson(value: unknown): string {
  */
 export function chatCompletionsToResponsesBody(raw: unknown): Rec {
   assertChatCompletionsRoutingBody(raw);
+  // Only the translated path reaches this function. Native Chat can retain its
+  // provider-specific file/audio blocks; projecting them here would discard them.
+  const unsupportedMedia = untranslatedChatInputMedia(raw);
+  if (unsupportedMedia) {
+    throw new ChatCompletionsRequestError(untranslatedInputMediaMessage(unsupportedMedia));
+  }
+
 
   const systemParts: string[] = [];
   const input: Rec[] = [];
@@ -295,17 +324,39 @@ export function chatCompletionsToResponsesBody(raw: unknown): Rec {
         break;
       }
       case "assistant": {
-        // The reasoning item PRECEDES the message: the Responses parser attributes pending
-        // reasoning to the following assistant turn, so this order is what makes the thinking
-        // land inside that turn (as an OcxThinkingContent part) rather than getting dropped at
-        // the turn boundary.
-        const blocks = assistantContentToBlocks(msg.content);
+        // A reasoning item precedes the assistant message it belongs to: the
+        // Responses assistant item schema admits only output content blocks, so there
+        // is no attachment point on the message itself, and the parser buffers a
+        // reasoning item and prepends it to the NEXT assistant message. Emitting it
+        // here keeps that adjacency intact.
         const reasoningText = assistantReasoningText(msg);
-        if (reasoningText && (blocks.length > 0 || msg.tool_calls !== undefined)) {
-          input.push({ type: "reasoning", content: [{ type: "reasoning_text", text: reasoningText }] });
+        if (reasoningText !== undefined) {
+          // `summary` is required on a reasoning input item by the OpenAI Responses API, and our
+          // own responsesRequestSchema marks it optional, so a summary-less item validated locally
+          // and was refused upstream with `Missing required parameter: 'input[N].summary'`. It also
+          // has to carry the text, not just satisfy the field: sanitizeReasoningInputContent blanks
+          // `content` for every destination except a `preserveResponsesReasoningContent` provider,
+          // so summary is the only channel that survives to a native backend. This mirrors the
+          // Claude ingress (src/claude/inbound.ts), which has always minted both.
+          input.push({
+            type: "reasoning",
+            summary: [{ type: "summary_text", text: reasoningText }],
+            content: [{ type: "reasoning_text", text: reasoningText }],
+          });
         }
+        const blocks = assistantContentToBlocks(msg.content);
         if (blocks.length > 0) input.push({ type: "message", role: "assistant", content: blocks });
         if (msg.tool_calls !== undefined) toolCallsToItems(msg.tool_calls, input, knownNameByCallId);
+        break;
+      }
+      case "function": {
+        // Native eligibility diverts legacy image results too, but this translator
+        // has no legacy function_call/name pairing. Never silently discard them.
+        if (Array.isArray(msg.content) && msg.content.some(part => isRec(part) && imageUrlFromPart(part))) {
+          throw new ChatCompletionsRequestError(
+            "Legacy function-result image translation is not implemented. Use tool_calls and role:tool with tool_call_id.",
+          );
+        }
         break;
       }
       case "tool": {
@@ -350,6 +401,13 @@ export function chatCompletionsToResponsesBody(raw: unknown): Rec {
   if (typeof maxTokens === "number") body.max_output_tokens = maxTokens;
   if (typeof raw.temperature === "number") body.temperature = raw.temperature;
   if (typeof raw.top_p === "number") body.top_p = raw.top_p;
+  // responsesRequestSchema accepts both, parser.ts reads them into
+  // options.presencePenalty/frequencyPenalty, and the openai-chat adapter writes them
+  // back to the wire. Only this first link was missing, so a Chat caller's penalties
+  // never reached a provider that supports them. Per-model noPenaltyModels opt-outs
+  // still apply at the adapter.
+  if (typeof raw.presence_penalty === "number") body.presence_penalty = raw.presence_penalty;
+  if (typeof raw.frequency_penalty === "number") body.frequency_penalty = raw.frequency_penalty;
   if (raw.stop !== undefined) body.stop = raw.stop;
   if (typeof raw.user === "string") body.user = raw.user;
   if (typeof raw.parallel_tool_calls === "boolean") body.parallel_tool_calls = raw.parallel_tool_calls;

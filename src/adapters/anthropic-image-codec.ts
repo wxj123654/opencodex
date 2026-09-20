@@ -41,7 +41,9 @@ export const MAX_INPUT_BASE64_LENGTH = 64 * MiB;
  * would widen the adapter contract with no demonstrated need.
  */
 export const IMAGE_NORMALIZE_CONCURRENCY = 4;
-export const MAX_INPUT_PIXELS = 100_000_000;
+// Keep one decoded RGBA surface below 64 MiB. Native codecs may allocate additional
+// working buffers, so this is paired with process-wide admission in the normalizer.
+export const MAX_INPUT_PIXELS = 16_000_000;
 
 
 /** Formats Anthropic accepts as-is; anything else must be transcoded or dropped. */
@@ -50,6 +52,8 @@ const PASSTHROUGH_MEDIA = new Set(["image/jpeg", "image/png", "image/gif", "imag
 export interface NormalizeOptions {
   /** Shift every image's starting ladder position down (413 retry tightening; 030). */
   tierBias?: number;
+  /** Cancels queued native decode work and stops pulling more images. */
+  abortSignal?: AbortSignal;
   /** Test seam: replaces the Bun.Image encode path (audit round 1, blocker 6). */
   encode?: EncodeFn;
   /** Test seam: replaces the pass-through decode validation (C-gate round 1, blocker 1). */
@@ -104,6 +108,62 @@ let cacheBytes = 0;
 let cacheMetadataBytes = 0;
 let cacheSentinelEntries = 0;
 let encodeCalls = 0;
+
+/**
+ * Last-EMITTED ladder position per image identity (#4532). The age-tier pyramid in
+ * anthropic-image-normalize derives an image's start position from its recency rank
+ * within the current request, so appending one newer image shifts every older image's
+ * rank by one and can push it across a tier boundary — re-encoding it to different
+ * bytes and busting Anthropic's prompt prefix cache for the whole history. Pinning the
+ * start position to the image's own identity keeps already-emitted bytes stable across
+ * appends. Keys are the encode cache's identity minus the position suffix
+ * (`${hash}:${mediaType}`, see processAt). Entry-count cap with LRU eviction: a
+ * value is one small number, so a count bound is a byte bound (~4096 * ~50B worst
+ * case, far under the app-owned memory budget's headroom).
+ */
+const POSITION_STORE_MAX_ENTRIES = 4_096;
+const emittedPositions = new Map<string, number>();
+
+function positionKey(b64: string, mediaType: string): string {
+  return `${Bun.hash(b64).toString(36)}:${mediaType}`;
+}
+
+/**
+ * The position this image was last emitted at, if it has been normalized before.
+ * Reads refresh recency (insertion-order LRU, same discipline as the encode cache).
+ */
+export function recordedEmittedPosition(b64: string, mediaType: string): number | undefined {
+  const key = positionKey(b64, mediaType);
+  const pos = emittedPositions.get(key);
+  if (pos !== undefined) {
+    emittedPositions.delete(key);
+    emittedPositions.set(key, pos);
+  }
+  return pos;
+}
+
+/**
+ * Record the position an image actually ended at. Positions only ever move DOWN the
+ * ladder (first-pass tier, aggregate demotion, tierBias) — nothing raises an image
+ * back up — so the stored value is monotonically non-decreasing and cannot flap.
+ * That monotonicity is what makes identity-pinning safe: a stale entry can only make
+ * an image smaller than its fresh tier would, never larger.
+ */
+export function recordEmittedPosition(b64: string, mediaType: string, pos: number): void {
+  const key = positionKey(b64, mediaType);
+  const existing = emittedPositions.get(key);
+  if (existing !== undefined) {
+    emittedPositions.delete(key);
+    pos = Math.max(existing, pos);
+  }
+  while (emittedPositions.size + 1 > POSITION_STORE_MAX_ENTRIES) {
+    const oldest = emittedPositions.keys().next().value;
+    if (oldest === undefined) break;
+    emittedPositions.delete(oldest);
+  }
+  emittedPositions.set(key, pos);
+  enforceAppOwnedMemoryBudget();
+}
 
 function cacheEntry(key: string, value: CacheValue): CacheEntry {
   const keyBytes = cacheEncoder.encode(key).byteLength;
@@ -180,6 +240,7 @@ export function getNormalizeStatsForTests(): {
 }
 export function resetNormalizeStateForTests(): void {
   cache.clear();
+  emittedPositions.clear();
   cacheBytes = 0;
   cacheMetadataBytes = 0;
   cacheSentinelEntries = 0;
@@ -218,6 +279,9 @@ export const bunImageEncode: EncodeFn = async (input, spec, quality) => {
   const meta = await image.metadata();
   const w = typeof meta.width === "number" ? meta.width : 0;
   const h = typeof meta.height === "number" ? meta.height : 0;
+  if (w <= 0 || h <= 0 || w * h > MAX_INPUT_PIXELS) {
+    throw new Error("image dimensions exceed the safe decode limit");
+  }
   let pipeline = new Bun.Image(input);
   if (w > spec.maxEdge || h > spec.maxEdge) {
     const scale = spec.maxEdge / Math.max(w, h);
@@ -233,7 +297,14 @@ export const bunImageEncode: EncodeFn = async (input, spec, quality) => {
  * instead of riding pass-through to an Anthropic 400 (C-gate round 1, blocker 1).
  */
 export const bunImageValidate: ValidateFn = async input => {
-  await new Bun.Image(input).resize(1, 1).jpeg({ quality: 1 }).toBuffer();
+  const image = new Bun.Image(input);
+  const meta = await image.metadata();
+  const w = typeof meta.width === "number" ? meta.width : 0;
+  const h = typeof meta.height === "number" ? meta.height : 0;
+  if (w <= 0 || h <= 0 || w * h > MAX_INPUT_PIXELS) {
+    throw new Error("image dimensions exceed the safe decode limit");
+  }
+  await image.resize(1, 1).jpeg({ quality: 1 }).toBuffer();
 };
 
 /**

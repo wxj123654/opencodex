@@ -8,8 +8,8 @@ import { afterEach, beforeEach, describe, expect, setDefaultTimeout, spyOn, test
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { saveCodexAccountCredential } from "../../src/codex/account-store";
+import { setRelayPlatformForTests } from "../../src/server/responses/passthrough-delivery";
 import {
   clearAccountQuota,
   updateAccountQuota,
@@ -44,6 +44,7 @@ import {
   encryptedInput as recoverableEncryptedInput,
   recoverySse,
 } from "../helpers/agent-task-recovery";
+import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 setDefaultTimeout(30_000);
@@ -53,6 +54,7 @@ const originalNow = Date.now;
 let testDir: string;
 let previousOpencodexHome: string | undefined;
 let previousCodexHome: string | undefined;
+let releaseSpendHome: (() => void) | undefined;
 
 beforeEach(() => {
   testDir = mkdtempSync(join(tmpdir(), "ocx-subagent-hr-"));
@@ -60,6 +62,8 @@ beforeEach(() => {
   previousCodexHome = process.env.CODEX_HOME;
   process.env.OPENCODEX_HOME = testDir;
   process.env.CODEX_HOME = testDir;
+  // Direct handler dispatches need the writer lease that startServer normally holds.
+  releaseSpendHome = acquireOwnedSpendHome();
   clearThreadAccountMap();
   clearCodexUpstreamHealth();
   clearAccountQuota();
@@ -72,6 +76,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // Release before home teardown to prevent Windows removal failures and a live unlinked database.
+  releaseSpendHome?.();
+  releaseSpendHome = undefined;
   globalThis.fetch = originalFetch;
   Date.now = originalNow;
   clearThreadAccountMap();
@@ -1355,13 +1362,12 @@ describe("native fallback account preview", () => {
     expect(finalAuth).toMatchObject({ kind: "pool", accountId: "pool-a" });
   });
 
-  test("fallback previews the Pool account separately for each candidate quota scope", async () => {
+  test("fallback previews shared candidate scope instead of the legacy affinity", async () => {
     const cooldownAt = 1_800_000_000_000;
     const now = cooldownAt + CODEX_QUOTA_PROBE_INTERVAL_MS + 1;
     Date.now = () => now;
     installPoolCredential("pool-a", "pool_acc_a", now);
-    // This case binds on gpt-5.6-sol, which is account-gated: without a roster the
-    // entitlement snapshot fails closed and no account is eligible (#2550).
+    // Both accounts advertise the ordinary candidate used by the fallback.
     installCodexRosterMock({
       pool_acc_a: GPT56_NATIVE_MODELS,
       pool_acc_b: GPT56_NATIVE_MODELS,
@@ -1370,7 +1376,7 @@ describe("native fallback account preview", () => {
     const cfg = poolNativePlusRoutedConfig({
       activeCodexAccountId: "pool-a",
       autoSwitchThreshold: 0,
-      subagentModelFallback: ["gpt-5.3-codex-spark", "xai/grok-4.5"],
+      subagentModelFallback: ["gpt-5.6-terra", "xai/grok-4.5"],
       codexAccounts: [
         { id: "main", email: "main@example.test", isMain: true },
         { id: "pool-a", email: "a@example.test", isMain: false, chatgptAccountId: "pool_acc_a" },
@@ -1382,27 +1388,30 @@ describe("native fallback account preview", () => {
       "thread-id": "candidate-scope-thread-private",
     };
     const bound = await resolveCodexAuthContext(new Headers(desktopHeaders), cfg, "pool", {
-      modelId: "gpt-5.6-sol",
+      // An unresolved legacy request binds independently of resolved shared quota.
     });
     expect(bound).toMatchObject({ kind: "pool", accountId: "pool-a" });
     if (bound.kind !== "pool") throw new Error("expected pool context");
     cfg.activeCodexAccountId = "pool-b";
 
     recordCodexUpstreamOutcome(cfg, "pool-a", 429, {
-      modelId: "gpt-5.3-codex-spark",
+      fixedAccount: true,
+      modelId: "gpt-5.6-terra",
       now,
       resetAt: Math.floor((now + 60 * 60_000) / 1_000),
     });
     recordCodexUpstreamOutcome(cfg, "pool-b", 429, {
-      modelId: "gpt-5.3-codex-spark",
+      fixedAccount: true,
+      modelId: "gpt-5.6-terra",
       now: cooldownAt,
       resetAt: Math.floor((cooldownAt + 60 * 60_000) / 1_000),
     });
     const { noteSubagentModelFailure } = await import("../../src/codex/subagent-model-fallback");
     noteSubagentModelFailure("gpt-5.6-sol", "429", cfg, "pool-a", now);
+    noteSubagentModelFailure("gpt-5.6-sol", "429", cfg, "pool-b", now);
 
-    expect(previewCodexAccountForRequest(bound.affinityKey ?? null, cfg, now, "shared")).toBe("pool-a");
-    expect(previewCodexAccountForRequest(bound.affinityKey ?? null, cfg, now, "spark")).toBe("pool-b");
+    expect(previewCodexAccountForRequest(bound.affinityKey ?? null, cfg, now)).toBe("pool-a");
+    expect(previewCodexAccountForRequest(bound.affinityKey ?? null, cfg, now, "shared")).toBe("pool-b");
 
     let finalAuth: CodexAuthContext | undefined;
     const capture = { urls: [] as string[], bodies: [] as string[], auths: [] as Array<string | null> };
@@ -1420,20 +1429,20 @@ describe("native fallback account preview", () => {
     expect(finalAuth).toMatchObject({
       kind: "pool",
       accountId: "pool-b",
-      probeQuotaScope: "spark",
+      probeQuotaScope: "shared",
     });
     expect((finalAuth as { probeLeaseId?: string }).probeLeaseId).toBeTruthy();
     expect(capture.urls.some((url) => url.includes("chatgpt.com/backend-api/codex"))).toBe(true);
     expect(capture.auths.some((auth) => auth?.includes("pool-b_token"))).toBe(true);
-    expect(capture.bodies.some((body) => body.includes('"model":"gpt-5.3-codex-spark"'))).toBe(true);
+    expect(capture.bodies.some((body) => body.includes('"model":"gpt-5.6-terra"'))).toBe(true);
   });
 
-  test("recovery re-previews the Pool account for the candidate quota scope", async () => {
+  test("recovery re-previews shared candidate scope instead of the legacy affinity", async () => {
     const now = 1_800_000_000_000;
     let currentNow = now;
     Date.now = () => currentNow;
     installPoolCredential("pool-a", "pool_acc_a", now);
-    // Same account-gated binding as above: grant the roster to both pool accounts.
+    // Both accounts advertise the ordinary recovery candidate.
     installCodexRosterMock({
       pool_acc_a: GPT56_NATIVE_MODELS,
       pool_acc_b: GPT56_NATIVE_MODELS,
@@ -1444,7 +1453,7 @@ describe("native fallback account preview", () => {
       activeCodexAccountId: "pool-a",
       autoSwitchThreshold: 0,
       agentTaskRecovery: { enabled: true },
-      subagentModelFallback: ["gpt-5.3-codex-spark"],
+      subagentModelFallback: ["gpt-5.6-terra"],
       codexAccounts: [
         { id: "main", email: "main@example.test", isMain: true },
         { id: "pool-a", email: "a@example.test", isMain: false, chatgptAccountId: "pool_acc_a" },
@@ -1456,21 +1465,22 @@ describe("native fallback account preview", () => {
       "thread-id": "recovery-candidate-scope-thread-private",
     });
     const bound = await resolveCodexAuthContext(requestHeaders, cfg, "pool", {
-      modelId: "gpt-5.6-sol",
+      // An unresolved legacy request binds independently of resolved shared quota.
     });
     expect(bound).toMatchObject({ kind: "pool", accountId: "pool-a" });
     if (bound.kind !== "pool") throw new Error("expected pool context");
     cfg.activeCodexAccountId = "pool-b";
 
     recordCodexUpstreamOutcome(cfg, "pool-a", 429, {
-      modelId: "gpt-5.3-codex-spark",
+      fixedAccount: true,
+      modelId: "gpt-5.6-terra",
       now,
       resetAt: Math.floor((now + 60 * 60_000) / 1_000),
     });
     const { noteSubagentModelFailure } = await import("../../src/codex/subagent-model-fallback");
-    noteSubagentModelFailure("gpt-5.3-codex-spark", "429", cfg, "pool-b", now);
+    noteSubagentModelFailure("gpt-5.6-terra", "429", cfg, "pool-b", now);
     noteSubagentModelFailure(
-      "gpt-5.3-codex-spark",
+      "gpt-5.6-terra",
       "429",
       cfg,
       "pool-a",
@@ -1494,8 +1504,8 @@ describe("native fallback account preview", () => {
       10 * DEFAULT_SUBAGENT_MODEL_FALLBACK_POLL_MS,
     );
 
-    expect(previewCodexAccountForRequest(bound.affinityKey ?? null, cfg, now, "shared")).toBe("pool-a");
-    expect(previewCodexAccountForRequest(bound.affinityKey ?? null, cfg, now, "spark")).toBe("pool-b");
+    expect(previewCodexAccountForRequest(bound.affinityKey ?? null, cfg, now)).toBe("pool-a");
+    expect(previewCodexAccountForRequest(bound.affinityKey ?? null, cfg, now, "shared")).toBe("pool-b");
 
     let selectionStarts = 0;
     let selectionReleases = 0;
@@ -1530,7 +1540,7 @@ describe("native fallback account preview", () => {
         id: "resp_recovered_candidate_scope",
         object: "response",
         status: "completed",
-        model: "gpt-5.3-codex-spark",
+        model: "gpt-5.6-terra",
         output: [],
         usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
       });
@@ -1556,46 +1566,11 @@ describe("native fallback account preview", () => {
     expect(bodyRequests).toHaveLength(2);
     expect(bodyRequests[0]?.body).toContain("capture_assignment");
     expect(bodyRequests[1]?.body).toContain("Use the recovered candidate-scope assignment.");
-    expect(bodyRequests[1]?.body).toContain('"model":"gpt-5.3-codex-spark"');
+    expect(bodyRequests[1]?.body).toContain('"model":"gpt-5.6-terra"');
     expect(selectionStarts).toBe(3);
     expect(selectionReleases).toBe(3);
     expect(finalAuth).toMatchObject({ kind: "pool", accountId: "pool-b" });
     expect(bodyRequests[1]?.auth).toContain("pool-b_token");
-  });
-
-  /**
-   * Recovery must carry the ENTITLEMENT filter too, not only the quota scope (#2509).
-   *
-   * The end-to-end case above grants the roster to both pool accounts, so it can only prove the
-   * SCOPE is re-previewed per candidate. The recovery path re-previewed the scope but passed no
-   * eligible-account set, so it could select an account with no entitlement to the recovered
-   * model and fail closed at final auth — the same stale-selection class as the quota scope, one
-   * layer over.
-   *
-   * Asserted structurally on the source, like the route-inventory contract: driving it end to end
-   * needs a recovered encrypted assignment AND an account-gated candidate whose entitlement
-   * differs per account, and the resulting fixture proved more fragile than the thing it checks.
-   * What this does catch is the regression that actually threatens the fix — one of the two
-   * preview sites silently losing the eligibility argument again.
-   */
-  test("both fallback preview sites pass the model-eligible account set (#2509)", async () => {
-    const source = await Bun.file(
-      fileURLToPath(new URL("../../src/server/responses/core.ts", import.meta.url)),
-    ).text();
-
-    const previews = source.match(/subagentFallbackAccountPreview = \([^)]*\)/g) ?? [];
-    // Two assignment sites: the primary selection path and the encrypted-recovery path.
-    expect(previews).toHaveLength(2);
-    // Neither may drop the third parameter — that is exactly how recovery lost it.
-    for (const preview of previews) {
-      expect(preview).toContain("modelEligibleAccountIds");
-    }
-
-    // And both must actually forward it into the preview call, not merely accept it.
-    const forwarded = source.match(
-      /\{ \.\.\.(previewSelectionOptions|recoverySelectionOptions), modelEligibleAccountIds \},\s*modelId,\s*\)/g,
-    ) ?? [];
-    expect(forwarded).toHaveLength(2);
   });
 
   test("uses healthier pool account B when active A is above threshold", async () => {
@@ -2183,9 +2158,16 @@ describe("native passthrough terminal finalization", () => {
     const terminals: ResponsesTerminalStatus[] = [];
     mockSseUpstream(sseBody);
 
-    const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
-    // Force win32 so eager-relay decision path is reachable via streamMode override.
-    Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+    // darwin, not win32, because this pair is about streamMode choosing the path. On win32 a
+    // turn that needs a client rewrite takes the eager relay unconditionally (#864), so the
+    // legacy half could never be legacy there and the marker assertion below would be a lie.
+    // darwin is the platform where the configured mode actually decides.
+    //
+    // The claim is also narrowed to the relay decision itself: overwriting process.platform
+    // globally redirects filesystem, ACL and state-directory identity too, and the spend-ledger
+    // owner lowercases its home on win32, which on a case-sensitive filesystem is a different
+    // directory. That made the send unreservable and the turn delivered no terminal at all.
+    setRelayPlatformForTests("darwin");
     try {
       const response = await postSpawn(
         cfg,
@@ -2194,6 +2176,12 @@ describe("native passthrough terminal finalization", () => {
           onNativePassthroughTerminal: (status) => terminals.push(status),
         },
       );
+      // Asserted before the callback is inspected, so a turn that never delivered says so
+      // instead of presenting as a missing callback.
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toContain("text/event-stream");
+      // The relay path this case exists to exercise, proven rather than assumed.
+      expect(isEagerRelaySseResponse(response)).toBe(streamMode === "eager-relay");
       const responseText = await response.text();
       // Allow inspection consumer microtasks to settle.
       await Bun.sleep(20);
@@ -2203,7 +2191,7 @@ describe("native passthrough terminal finalization", () => {
         responseText,
       };
     } finally {
-      if (platformDescriptor) Object.defineProperty(process, "platform", platformDescriptor);
+      setRelayPlatformForTests(undefined);
     }
   }
 

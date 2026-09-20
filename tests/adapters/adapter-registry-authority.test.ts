@@ -21,10 +21,10 @@ const EXPECTED_ADAPTER_NAMES = {
   azure: "azure-openai",
   "azure-openai": "azure-openai",
   cursor: "cursor",
+  devin: "devin",
   "mimo-free": "mimo-free",
   qoder: "qoder",
   "devin-http": "devin-http",
-  "windsurf-api": "windsurf-api",
 } as const;
 
 function provider(adapter: string): OcxProviderConfig {

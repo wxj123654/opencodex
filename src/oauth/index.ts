@@ -1,6 +1,5 @@
 import type { KiroOAuthMetadata, OAuthController, OAuthCredentials } from "./types";
 import { initializeProviderModelSelection } from "../providers/initial-model-selection";
-import { parseCallbackInput } from "./callback-server";
 import type { OcxConfig, OcxProviderConfig, RefreshPolicy } from "../types";
 import { ConfigMutationLockError, loadConfig, mutatePersistedConfig, saveConfig } from "../config";
 import { resolveProviderApiKey } from "../providers/key-store";
@@ -38,6 +37,7 @@ import { loginNous, NousTokenError, refreshNousToken, clearNousRefreshIntent, Re
 import { loginChatGPT, refreshChatGPTToken, type ChatGPTLoginFlow } from "./chatgpt";
 import { loginAntigravity, refreshAntigravityToken } from "./google-antigravity";
 import { loginCursor, refreshCursorToken } from "./cursor";
+import { loginDevin, refreshDevinToken } from "./devin";
 import { loginGithubCopilot, refreshGithubCopilotToken, validateCopilotApiBaseUrl } from "./github-copilot";
 import { loginCommandCode, refreshCommandCodeToken } from "./command-code";
 import { loginMetaMuse, refreshMetaMuseToken } from "./meta-muse";
@@ -46,12 +46,13 @@ import { ANTIGRAVITY_REQUEST_UA } from "../adapters/google-antigravity-wire";
 import { deriveOAuthDefaultModel, deriveOAuthProviderConfig } from "../providers/derive";
 import { apiKeyPoolEntryId, sanitizeApiKeyValue } from "../providers/api-keys";
 import { effectiveGoogleMode, getProviderRegistryEntry, mergeRegistryStaticHeaders, providerMatchesRegistryTransport } from "../providers/registry";
-import { resolveProviderModelDiscoveryUrl } from "../providers/model-discovery";
+import { providerModelsUrl, resolveProviderModelDiscoveryUrl } from "../providers/model-discovery";
 import { resolveProviderTransport } from "../providers/xai-transport";
 import { detectClaudeCodeToken, detectGrokCliToken, hasComparableGrokIdentity, isSameGrokIdentity, shouldAdoptGrokGeneration } from "./local-token-detect";
 import { logOAuthEvent } from "./log";
-import { captureConfigGeneration, sweepExpiredOnWrite, type GenerationContext } from "../lib/state-store-sweeper";
-import { retainedUtf8Bytes } from "../lib/admission";
+import { captureConfigGeneration, sweepExpiredOnWrite } from "../lib/state-store-sweeper";
+import { clearManualCodeSlot, ensureManualCodeSlot, kiroLoginSettling, loginAbort, loginState, waitForManualLoginCode } from "./login-flow-state";
+export { reconcileOAuthFlowState, submitManualLoginCode } from "./login-flow-state";
 import { randomUUID } from "node:crypto";
 export {
   CODEX_HEALTH_AUTH_FAILED_NOTE,
@@ -265,7 +266,9 @@ export const OAUTH_PROVIDERS: Record<string, OAuthProviderDef> = {
     defaultModel: oauthDefaultModel("kimi"),
   },
   "meta-muse": {
-    login: ctrl => loginMetaMuse(ctrl),
+    // Add-account/reauth must not reimport the credential already on disk; it starts the
+    // device grant instead, the same mapping command-code uses above.
+    login: (ctrl, opts) => loginMetaMuse(ctrl, {}, { importLocal: opts?.forceLogin ? "off" : "fallback" }),
     refresh: refreshMetaMuseToken,
     providerConfig: oauthConfig("meta-muse"),
     defaultModel: oauthDefaultModel("meta-muse"),
@@ -308,6 +311,16 @@ export const OAUTH_PROVIDERS: Record<string, OAuthProviderDef> = {
     providerConfig: oauthConfig("cursor"),
     defaultModel: oauthDefaultModel("cursor"),
   },
+  devin: {
+    // Import-first: adopts a signed-in Devin CLI credential when one exists and
+    // only then falls back to the Auth0 browser flow. forceLogin skips the
+    // import so reauth/add-account can reach a different account than the CLI's.
+    login: (ctrl, opts) => loginDevin(ctrl, opts),
+    refresh: refreshDevinToken,
+    providerConfig: oauthConfig("devin"),
+    defaultModel: oauthDefaultModel("devin"),
+    defaultRefreshPolicy: "disabled",
+  },
   "github-copilot": {
     login: (ctrl) => loginGithubCopilot(ctrl),
     refresh: (rt, signal) => refreshGithubCopilotToken(rt, signal),
@@ -320,8 +333,25 @@ export const OAUTH_PROVIDERS: Record<string, OAuthProviderDef> = {
     login: (ctrl, opts) => loginChatGPT(ctrl, { forceLogin: opts?.forceLogin, flow: opts?.flow }),
     refresh: (rt) => refreshChatGPTToken(rt),
     providerConfig: { adapter: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex", authMode: "forward" as const },
-    defaultModel: "gpt-5.4",
+    defaultModel: "gpt-5.6-luna",
   },
+};
+
+/**
+ * Removed provider ids that still name a live successor.
+ *
+ * `devin-cli` was merged into `devin` (import-first login absorbed the CLI
+ * credential import; devlog/_plan/260913_devin_provider_merge). The id can
+ * still arrive here from a saved config row or a stored credential slot that
+ * the startup migration has not rekeyed yet, and from a user typing the old
+ * name at `ocx login`. It is deliberately NOT an OAUTH_PROVIDERS entry:
+ * keeping one would re-expose it as a separate dashboard/login row, and its
+ * `oauthConfig("devin-cli")` would throw at module load once the registry row
+ * is gone. The alias map covers the paths that must keep working — refresh
+ * policy resolution below, and the login-cli dispatch that warns and reroutes.
+ */
+export const DEPRECATED_OAUTH_PROVIDER_ALIASES: Record<string, string> = {
+  "devin-cli": "devin",
 };
 
 export function isOAuthProvider(name: string): boolean {
@@ -344,7 +374,11 @@ function isRefreshPolicy(value: unknown): value is RefreshPolicy {
 export function resolveRefreshPolicy(provider: string, config: OcxConfig): RefreshPolicy {
   const override = config.providers[provider]?.refreshPolicy;
   if (isRefreshPolicy(override)) return override;
-  const def = OAUTH_PROVIDERS[provider];
+  // Resolve through the alias map so a lingering `devin-cli` row inherits
+  // devin's "disabled" policy. Without it the row would fall to "lazy-only"
+  // and the guardian would attempt refreshes Cognition has no endpoint for,
+  // marking the account needsReauth on a durable key that cannot refresh.
+  const def = OAUTH_PROVIDERS[DEPRECATED_OAUTH_PROVIDER_ALIASES[provider] ?? provider];
   return def?.defaultRefreshPolicy ?? "lazy-only";
 }
 
@@ -1194,7 +1228,7 @@ export function buildModelsRequest(
     return { url: discoveryUrl(`${base}/v1/models?limit=1000`), headers };
   }
   if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
-  return { url: discoveryUrl(`${effectiveProvider.baseUrl}/models`), headers };
+  return { url: discoveryUrl(providerModelsUrl(effectiveProvider.baseUrl)), headers };
 }
 
 /**
@@ -1676,110 +1710,6 @@ export async function runLogin(
  * localhost), the GUI can POST the final redirect URL or authorization code via
  * submitManualLoginCode(), which feeds OAuthController.onManualCodeInput.
  */
-const loginState = new Map<string, { error?: string; done: boolean }>();
-const loginAbort = new Map<string, AbortController>();
-const kiroLoginSettling = new Set<string>();
-
-/** Pending paste for a login in progress: either a waiter or a stashed early submission. */
-interface ManualCodeSlot {
-  pendingInput?: string;
-  resolve?: (value: string) => void;
-  /** Registered by the callback flow so submits can validate state synchronously. */
-  expectedState?: string;
-}
-const loginManual = new Map<string, ManualCodeSlot>();
-const OAUTH_PENDING_CODE_MAX_BYTES = 4 * 1024;
-let lastOAuthFlowReconciledGeneration = 0;
-
-export function reconcileOAuthFlowState(context: GenerationContext): number {
-  if (context.generation <= lastOAuthFlowReconciledGeneration) return 0;
-  let removed = 0;
-  for (const [provider, state] of loginState) {
-    if (context.providerNames.has(provider) || !state.done || loginAbort.has(provider)) continue;
-    if (loginState.delete(provider)) removed += 1;
-    if (loginManual.delete(provider)) removed += 1;
-    if (loginAbort.delete(provider)) removed += 1;
-  }
-  lastOAuthFlowReconciledGeneration = context.generation;
-  return removed;
-}
-
-function clearManualCodeSlot(provider: string): void {
-  loginManual.delete(provider);
-}
-
-function ensureManualCodeSlot(provider: string): ManualCodeSlot {
-  let slot = loginManual.get(provider);
-  if (!slot) {
-    slot = {};
-    loginManual.set(provider, slot);
-  }
-  return slot;
-}
-
-/** Wait for a GUI/CLI paste of the OAuth redirect URL or code (or return a stashed early submit). */
-function waitForManualLoginCode(provider: string, signal: AbortSignal, expectedState?: string): Promise<string> {
-  if (signal.aborted) {
-    return Promise.reject(new Error(`OAuth callback cancelled: ${signal.reason}`));
-  }
-  const slot = ensureManualCodeSlot(provider);
-  if (expectedState !== undefined) slot.expectedState = expectedState;
-  if (slot.pendingInput !== undefined) {
-    const value = slot.pendingInput;
-    slot.pendingInput = undefined;
-    return Promise.resolve(value);
-  }
-  return new Promise<string>((resolve, reject) => {
-    const onAbort = () => {
-      if (slot.resolve === resolve) slot.resolve = undefined;
-      reject(new Error(`OAuth callback cancelled: ${signal.reason}`));
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-    slot.resolve = (value: string) => {
-      signal.removeEventListener("abort", onAbort);
-      if (slot.resolve === resolve) slot.resolve = undefined;
-      resolve(value);
-    };
-  });
-}
-
-/**
- * Feed a pasted redirect URL or authorization code into an in-progress GUI login.
- * Returns ok:false when no login is waiting (or input is empty). Invalid pastes are accepted
- * here and re-prompted by the OAuth callback loop if they cannot be parsed / fail state checks.
- */
-export function submitManualLoginCode(provider: string, input: string): { ok: true } | { ok: false; error: string } {
-  const trimmed = input.trim();
-  if (!trimmed) return { ok: false, error: "empty code" };
-  if (retainedUtf8Bytes(trimmed) > OAUTH_PENDING_CODE_MAX_BYTES) return { ok: false, error: "code too large" };
-  const st = loginState.get(provider);
-  if (!st || st.done) return { ok: false, error: "no login in progress" };
-  const slot = ensureManualCodeSlot(provider);
-  // Synchronous validation (validated request/ack): reject un-parseable input and
-  // authorization responses (url/query kind) whose state is missing or mismatched
-  // once the flow has registered its expected state. Raw codes stay in-session-PKCE
-  // protected. Early posts (flow not yet waiting, no expectedState) are stashed and
-  // re-validated by the callback loop.
-  const parsed = parseCallbackInput(trimmed);
-  // Command Code's manual fallback accepts a pasted JSON callback payload
-  // (`{ apiKey, state, ... }`) which has no `code` param. Let it through the
-  // shared gate so the provider-specific parser can validate it.
-  const isCommandCodeJson = provider === "command-code" && trimmed.startsWith("{") && !parsed.code;
-  if (!parsed.code && !isCommandCodeJson) return { ok: false, error: "no authorization code found in input" };
-  if (parsed.kind !== "raw" && slot.expectedState !== undefined) {
-    if (parsed.state === undefined) return { ok: false, error: "redirect URL is missing the state parameter" };
-    if (parsed.state !== slot.expectedState) return { ok: false, error: "state mismatch — paste the redirect URL from THIS login attempt" };
-  }
-  if (slot.resolve) {
-    const resolve = slot.resolve;
-    slot.resolve = undefined;
-    resolve(trimmed);
-  } else {
-    // Race: GUI may POST before the flow reaches onManualCodeInput — stash for the waiter.
-    slot.pendingInput = trimmed;
-  }
-  return { ok: true };
-}
 
 export interface OAuthAccountSummary {
   id: string;

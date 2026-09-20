@@ -13,9 +13,15 @@ import type { OcxConfig, OcxProviderConfig } from "../../src/types";
 import { createResponsesPassthroughAdapter } from "../../src/adapters/openai-responses";
 import { parseRequest } from "../../src/responses/parser";
 import { withTestTranslatorBudget } from "../helpers/translator-budget";
+import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 
 const MODEL = "gpt-5.6-luna";
 const GO_RESPONSES_MODELS = [MODEL, "grok-4.6", "muse-spark-1.3-contributor"];
+let releaseSpendHome: (() => void) | undefined;
+
+// Direct dispatch needs the writer lease that startServer normally owns for this home.
+const takeSpendHome = (): void => { releaseSpendHome ??= acquireOwnedSpendHome(); };
+const dropSpendHome = (): void => { releaseSpendHome?.(); releaseSpendHome = undefined; };
 
 function opencodeGo(overrides: Partial<OcxProviderConfig> = {}): OcxProviderConfig {
   const entry = getProviderRegistryEntry("opencode-go");
@@ -102,7 +108,11 @@ describe("OpenCode Go stateless Responses", () => {
 
 describe("OpenCode Go stateless reasoning and continuation routes", () => {
   const originalFetch = globalThis.fetch;
-  afterEach(() => { globalThis.fetch = originalFetch; });
+  afterEach(() => {
+    // Release the preload-home lease before later teardown can replace or remove that home.
+    dropSpendHome();
+    globalThis.fetch = originalFetch;
+  });
 
   const continuations = [
     { id: "full", name: "full history", fullHistory: true, summary: "auto" },
@@ -147,6 +157,7 @@ describe("OpenCode Go stateless reasoning and continuation routes", () => {
       }) as typeof fetch;
       const config = { providers: { "opencode-go": opencodeGo() } } as unknown as OcxConfig;
       const drive = async (body: Record<string, unknown>) => {
+        takeSpendHome();
         const response = await handleResponses(new Request("http://localhost/v1/responses", {
           method: "POST", headers: { "content-type": "application/json" },
           body: JSON.stringify({ model: `opencode-go/${model}`, stream: streaming, reasoning: { summary: continuation.summary },
@@ -163,19 +174,17 @@ describe("OpenCode Go stateless reasoning and continuation routes", () => {
       const initial = { type: "message", role: "user", content: [{ type: "input_text", text: "Run probe" }] };
       const first = await drive({ input: [initial] });
       expect(first.document.output[0]).toEqual(reasoning[0]);
-      expect(first.document.output[1]).toEqual(continuation.summary === "auto" ? {
-        type: "reasoning", id: `rs_${prefix}_content`, status: "completed", summary: [{ type: "summary_text", text: "Visible thinking" }],
-      } : reasoning[1]);
+      // The passthrough keeps native content-channel reasoning in both display modes.
+      expect(first.document.output[1]).toEqual(reasoning[1]);
       expect(first.document.output[2]).toEqual(reasoning[2]);
       expect(first.document.output[3]).toMatchObject(call);
       expect(first.document.output[4]).toEqual(priorMessage);
       if (streaming) {
-        const channel = continuation.summary === "auto" ? "reasoning_summary_text" : "reasoning_text";
-        expect(first.text).toContain(`"type":"response.${channel}.delta"`);
+        expect(first.text).toContain('"type":"response.reasoning_text.delta"');
       }
       const result = { type: "function_call_output", call_id: call.call_id, output: "probe succeeded" };
       // Echo exactly the client-visible history through handleResponses. An upstream-shape
-      // cache would prepend it again after the content-to-summary rewrite (F1).
+      // cache would prepend it again (F1).
       const nextBody = {
         input: continuation.fullHistory ? [initial, ...first.document.output, result] : [result],
         previous_response_id: first.document.id, store: true,
@@ -207,9 +216,8 @@ describe("OpenCode Go stateless reasoning and continuation routes", () => {
       expect(replay.filter(item => item.type === "reasoning")).toHaveLength(3);
       expect(replay).toContainEqual(expect.objectContaining({ type: "reasoning", encrypted_content: blob }));
       expect(JSON.stringify(replay)).toContain("Already summarized");
-      if (continuation.summary === "auto") expect(replay).toContainEqual(expect.objectContaining({
-        type: "reasoning", summary: [{ type: "summary_text", text: "Visible thinking" }],
-      }));
+      // Replay sanitation strips reasoning content in both display modes (F1), so the
+      // visible "Visible thinking" trace does not re-enter the upstream history.
       expect(JSON.stringify(replay)).not.toContain("no tool result was recorded");
     });
   }
@@ -217,7 +225,10 @@ describe("OpenCode Go stateless reasoning and continuation routes", () => {
 
 describe("OpenCode Go Luna Responses route (#1482)", () => {
   const originalFetch = globalThis.fetch;
-  afterEach(() => { globalThis.fetch = originalFetch; });
+  afterEach(() => {
+    dropSpendHome();
+    globalThis.fetch = originalFetch;
+  });
 
   test("handleResponses sends Luna to the documented /responses endpoint", async () => {
     const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
@@ -237,6 +248,7 @@ describe("OpenCode Go Luna Responses route (#1482)", () => {
     const config = {
       providers: { "opencode-go": opencodeGo() },
     } as unknown as OcxConfig;
+    takeSpendHome();
     const response = await handleResponses(
       new Request("http://localhost/v1/responses", {
         method: "POST",

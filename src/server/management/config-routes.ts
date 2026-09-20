@@ -1,8 +1,15 @@
+import { compactionRoutingSchema } from "../../config/schema/leaf-validators";
+import { captureConfigTopLevelRollback } from "../../config/rebase-provenance";
 import type { IntegrationClientId } from "../../integrations/registry";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { CatalogModel } from "../../codex/catalog";
 import { catalogModelSlug, invalidateCodexModelsCache, nativeContextLimits, nativeModelRows, uniqueCatalogModelsForPublicList } from "../../codex/catalog";
+import {
+  applyCodexDesktopSwitches,
+  describeCodexDesktopSwitches,
+  type CodexDesktopSwitchApply,
+} from "../../codex/desktop-switches";
 import {
   DEFAULT_SUBAGENT_MODELS,
   codexAutoStartEnabled,
@@ -105,12 +112,12 @@ import { filterRequestLogs, getRequestLogEntries, type RequestLogEntry } from ".
 import { estimateComboCost, estimateRequestCost, normalizeCostTokens, tokensPerSecond } from "../../usage/cost";
 import type { PersistedUsageAttempt } from "../../usage/log";
 import { isAllowedRequestOrigin, jsonResponse, providerManagementConfigError, publicProviderBaseUrl, safeConfigDTO } from "../auth-cors";
-import { withProviderServiceTierDTO } from "./provider-capability-config";
+import { withProviderCatalogCapabilityDTO } from "./provider-capability-config";
 import { applySystemEnvToggle } from "../system-env";
 import { getCachedStartupHealth, invalidateStartupHealthCache } from "../startup-health-cache";
 import { runWindowsTrayAction } from "../windows-tray-control";
 import { runStartupInstallAction, type StartupInstallAction } from "../startup-action-control";
-import { displayCodexRuntimePath, effortClampAppliesToRuntime, loadLastEffortClamp, resolveCodexRuntime } from "../../codex/runtime";
+import { displayCodexRuntimePath, effortClampAppliesToRuntime, liveRemovedEfforts, loadLastEffortClamp, resolveCodexRuntime } from "../../codex/runtime";
 
 import { isPlainRecord, parseDebugLogQuery, tokPerSecondResult, unavailableCostReason, costResult, requestLogDto, stripRegistryOnlyStaticHeaders, fetchAllModels } from "./shared";
 import type { MetricUnavailableReason, TokPerSecondResult, CostEstimateReason, CostResult, MetricSource } from "./shared";
@@ -181,7 +188,8 @@ interface ClientIntegrationSyncOutcome {
 export async function syncEnabledClientIntegrations(
   port: number | undefined,
   config: OcxConfig,
-  deps: Pick<ManagementContext["deps"], "fetchAllModels" | "writeDesktop3pConfig"> = {},
+  deps: Pick<ManagementContext["deps"],
+    "fetchAllModels" | "refreshOwnedCatalogIntegrations" | "writeDesktop3pConfig"> = {},
 ): Promise<ClientIntegrationSyncOutcome[]> {
   if (port === undefined) return [];
   const { claudeDesktopIntegrationEnabled, grokIntegrationEnabled } = await import("../../codex/desired-state");
@@ -230,14 +238,15 @@ export async function syncEnabledClientIntegrations(
   }
 
   const { refreshOwnedCatalogIntegrations } = await import("../../integrations/catalog-refresh");
-  out.push(...await refreshOwnedCatalogIntegrations({
+  const refreshOwned = deps.refreshOwnedCatalogIntegrations ?? refreshOwnedCatalogIntegrations;
+  out.push(...await refreshOwned({
     models: async () => {
       const { loadExportModels } = await import("./model-rows");
       return loadExportModels(config);
     },
     config,
     port,
-  }, ["mcode", "pi", "aside", "raycast"]));
+  }, ["mcode", "pi", "aside", "raycast", "omo", "cline"]));
 
   return out;
 }
@@ -261,7 +270,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
   const { req, url, config, deps, convergeCodexCatalog, syncClaudeAgentDefsBestEffort } = ctx;
   const readStartupHealth = deps.getCachedStartupHealth ?? getCachedStartupHealth;
   if (url.pathname === "/api/config" && req.method === "GET") {
-    return jsonResponse(withProviderServiceTierDTO(safeConfigDTO(config), config));
+    return jsonResponse(withProviderCatalogCapabilityDTO(safeConfigDTO(config), config));
   }
 
   if (url.pathname === "/api/config" && req.method === "PUT") {
@@ -316,12 +325,11 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       appOwnedMemoryBudgetMb: config.appOwnedMemoryBudgetMb ?? 256,
       codexAccountPickerEnabled: codexAccountPickerEnabled(config),
       codexQuotaAutoRefresh: quotaAutoRefreshSettings(config),
-      // Absent means hidden, so the GUI renders the switch without having to know that
-      // `undefined` and `false` mean the same thing.
-      showCodexSparkQuota: config.showCodexSparkQuota === true,
       // Absent means off, same convention: the GUI renders a plain switch without
       // needing to know that `undefined` and `false` mean the same thing here.
       ultraFastTier: config.ultraFastTier === true,
+      // Absent means on by default: the GUI renders a switch enabled unless explicit false.
+      fastRows: config.fastRows !== false,
       codexMainAccountHardLock: config.codexMainAccountHardLock === true,
       mainAccountHardLock: getMainAccountHardLockStatus(config),
       // Absent means the historical auto-open, so the GUI can render the toggle
@@ -331,6 +339,12 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       codexDesktopAuthless: config.codexDesktopAuthless === true,
       // Absent keeps Design B remote compaction; true selects the dedicated provider identity.
       codexClientCompaction: config.codexClientCompaction === true,
+      codexDesktopSwitches: describeCodexDesktopSwitches(config, {
+        applied: false,
+        reason: "not_requested",
+        retryable: false,
+      }),
+      compactionRouting: config.compactionRouting ?? null,
       startupHealth: await readStartupHealth(config),
       codexRuntime: {
         path: displayCodexRuntimePath(resolved.runtime.command),
@@ -344,7 +358,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
           : null,
         catalogClamp: {
           active: clampActive,
-          removedEfforts: clampActive ? (lastClamp?.removedEfforts ?? []) : [],
+          removedEfforts: clampActive ? [...liveRemovedEfforts(lastClamp)] : [],
           runtimeVersion: clampActive ? (lastClamp?.runtimeVersion ?? null) : null,
         },
         warning: warningParts.length > 0 ? warningParts.join(" ") : null,
@@ -417,11 +431,12 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       codexAccountPickerEnabled?: unknown;
       codexQuotaAutoRefresh?: unknown;
       oauthOpenBrowser?: unknown;
-      showCodexSparkQuota?: unknown;
       ultraFastTier?: unknown;
+      fastRows?: unknown;
       codexMainAccountHardLock?: unknown;
       codexDesktopAuthless?: unknown;
       codexClientCompaction?: unknown;
+      compactionRouting?: unknown;
     };
     if (body.codexAutoStart === undefined
       && body.streamMode === undefined
@@ -429,12 +444,13 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       && body.codexAccountPickerEnabled === undefined
       && body.codexQuotaAutoRefresh === undefined
       && body.oauthOpenBrowser === undefined
-      && body.showCodexSparkQuota === undefined
       && body.ultraFastTier === undefined
+      && body.fastRows === undefined
       && body.codexMainAccountHardLock === undefined
       && body.codexDesktopAuthless === undefined
-      && body.codexClientCompaction === undefined) {
-      return jsonResponse({ error: "provide codexAutoStart, streamMode, appOwnedMemoryBudgetMb, codexAccountPickerEnabled, codexQuotaAutoRefresh, oauthOpenBrowser, showCodexSparkQuota, ultraFastTier, codexMainAccountHardLock, codexDesktopAuthless, or codexClientCompaction" }, 400);
+      && body.codexClientCompaction === undefined
+      && body.compactionRouting === undefined) {
+      return jsonResponse({ error: "provide codexAutoStart, streamMode, appOwnedMemoryBudgetMb, codexAccountPickerEnabled, codexQuotaAutoRefresh, oauthOpenBrowser, ultraFastTier, fastRows, codexMainAccountHardLock, codexDesktopAuthless, codexClientCompaction, or compactionRouting" }, 400);
     }
     if (body.codexAutoStart !== undefined && typeof body.codexAutoStart !== "boolean") {
       return jsonResponse({ error: "codexAutoStart boolean is required" }, 400);
@@ -449,11 +465,11 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       && typeof body.codexAccountPickerEnabled !== "boolean") {
       return jsonResponse({ error: "codexAccountPickerEnabled boolean is required" }, 400);
     }
-    if (body.showCodexSparkQuota !== undefined && typeof body.showCodexSparkQuota !== "boolean") {
-      return jsonResponse({ error: "showCodexSparkQuota boolean is required" }, 400);
-    }
     if (body.ultraFastTier !== undefined && typeof body.ultraFastTier !== "boolean") {
       return jsonResponse({ error: "ultraFastTier boolean is required" }, 400);
+    }
+    if (body.fastRows !== undefined && typeof body.fastRows !== "boolean") {
+      return jsonResponse({ error: "fastRows boolean is required" }, 400);
     }
     if (body.codexMainAccountHardLock !== undefined && typeof body.codexMainAccountHardLock !== "boolean") {
       return jsonResponse({ error: "codexMainAccountHardLock boolean is required" }, 400);
@@ -463,6 +479,12 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
     }
     if (body.codexClientCompaction !== undefined && typeof body.codexClientCompaction !== "boolean") {
       return jsonResponse({ error: "codexClientCompaction boolean is required" }, 400);
+    }
+    const compactionRouting = body.compactionRouting == null
+      ? body.compactionRouting
+      : compactionRoutingSchema.safeParse(body.compactionRouting);
+    if (compactionRouting != null && !compactionRouting.success) {
+      return jsonResponse({ error: "compactionRouting requires a model, an optional valid reasoningEffort, and optional non-repeating triggers drawn from \"manual\" and \"auto\"" }, 400);
     }
     let quotaAutoRefreshChange: { id: string; window: "fiveHour" | "weekly"; enabled: boolean } | undefined;
     if (body.codexQuotaAutoRefresh !== undefined) {
@@ -493,6 +515,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
     )) {
       return jsonResponse({ error: `appOwnedMemoryBudgetMb must be an integer from ${MIN_APP_OWNED_MEMORY_BUDGET_MB} to ${MAX_APP_OWNED_MEMORY_BUDGET_MB}` }, 400);
     }
+    const restoreCompactionRouting = captureConfigTopLevelRollback(config, ["compactionRouting"]);
     const previousSettings = {
       codexAutoStart: config.codexAutoStart,
       hasCodexAutoStart: Object.hasOwn(config, "codexAutoStart"),
@@ -508,10 +531,10 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       hasCodexQuotaAutoRefresh: Object.hasOwn(config, "codexQuotaAutoRefresh"),
       oauthOpenBrowser: config.oauthOpenBrowser,
       hasOauthOpenBrowser: Object.hasOwn(config, "oauthOpenBrowser"),
-      showCodexSparkQuota: config.showCodexSparkQuota,
-      hasShowCodexSparkQuota: Object.hasOwn(config, "showCodexSparkQuota"),
       ultraFastTier: config.ultraFastTier,
       hasUltraFastTier: Object.hasOwn(config, "ultraFastTier"),
+      fastRows: config.fastRows,
+      hasFastRows: Object.hasOwn(config, "fastRows"),
       codexMainAccountHardLock: config.codexMainAccountHardLock,
       hasCodexMainAccountHardLock: Object.hasOwn(config, "codexMainAccountHardLock"),
       codexDesktopAuthless: config.codexDesktopAuthless,
@@ -523,6 +546,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
     let pickerIsEnabled = pickerWasEnabled;
     const authlessWasEnabled = config.codexDesktopAuthless === true;
     const clientCompactionWasEnabled = config.codexClientCompaction === true;
+    const fastRowsWasEnabled = config.fastRows !== false;
     try {
       if (typeof body.codexAutoStart === "boolean") {
         config.codexAutoStart = body.codexAutoStart;
@@ -546,19 +570,20 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       if (typeof body.oauthOpenBrowser === "boolean") {
         config.oauthOpenBrowser = body.oauthOpenBrowser;
       }
-      if (typeof body.showCodexSparkQuota === "boolean") {
-        config.showCodexSparkQuota = body.showCodexSparkQuota;
-      }
       // Off deletes the key rather than persisting `false`: absent is the documented
       // default, and a written `false` would survive as a decision nobody made.
       if (body.ultraFastTier === true) config.ultraFastTier = true;
       else if (body.ultraFastTier === false) deleteConfigTopLevelKey(config, "ultraFastTier");
+      if (body.fastRows === false) config.fastRows = false;
+      else if (body.fastRows === true) deleteConfigTopLevelKey(config, "fastRows");
       if (body.codexMainAccountHardLock === true) config.codexMainAccountHardLock = true;
       else if (body.codexMainAccountHardLock === false) deleteConfigTopLevelKey(config, "codexMainAccountHardLock");
       if (body.codexDesktopAuthless === true) config.codexDesktopAuthless = true;
       else if (body.codexDesktopAuthless === false) deleteConfigTopLevelKey(config, "codexDesktopAuthless");
       if (body.codexClientCompaction === true) config.codexClientCompaction = true;
       else if (body.codexClientCompaction === false) deleteConfigTopLevelKey(config, "codexClientCompaction");
+      if (compactionRouting === null) deleteConfigTopLevelKey(config, "compactionRouting");
+      else if (compactionRouting?.success) config.compactionRouting = compactionRouting.data;
       if (quotaAutoRefreshChange) {
         const { id, window, enabled } = quotaAutoRefreshChange;
         const setting = { ...(config.codexQuotaAutoRefresh?.[id] ?? {}) };
@@ -592,12 +617,12 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       if (previousSettings.hasOauthOpenBrowser) {
         config.oauthOpenBrowser = previousSettings.oauthOpenBrowser;
       } else deleteConfigTopLevelKey(config, "oauthOpenBrowser");
-      if (previousSettings.hasShowCodexSparkQuota) {
-        config.showCodexSparkQuota = previousSettings.showCodexSparkQuota;
-      } else deleteConfigTopLevelKey(config, "showCodexSparkQuota");
       if (previousSettings.hasUltraFastTier) {
         config.ultraFastTier = previousSettings.ultraFastTier;
       } else deleteConfigTopLevelKey(config, "ultraFastTier");
+      if (previousSettings.hasFastRows) {
+        config.fastRows = previousSettings.fastRows;
+      } else deleteConfigTopLevelKey(config, "fastRows");
       if (previousSettings.hasCodexMainAccountHardLock) {
         config.codexMainAccountHardLock = previousSettings.codexMainAccountHardLock;
       } else deleteConfigTopLevelKey(config, "codexMainAccountHardLock");
@@ -607,21 +632,40 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       if (previousSettings.hasCodexClientCompaction) {
         config.codexClientCompaction = previousSettings.codexClientCompaction;
       } else deleteConfigTopLevelKey(config, "codexClientCompaction");
+      restoreCompactionRouting();
       throw error;
     }
     if (typeof body.appOwnedMemoryBudgetMb === "number") {
       configureAppOwnedMemoryBudget(resolveAppOwnedMemoryBudgetBytes(body.appOwnedMemoryBudgetMb));
       enforceAppOwnedMemoryBudget();
     }
-    // Both Desktop compatibility switches change the injected config.toml shape, so converge now
-    // rather than waiting for the next start; the injector re-reads config and rewrites the form.
     const authlessIsEnabled = config.codexDesktopAuthless === true;
     const clientCompactionIsEnabled = config.codexClientCompaction === true;
-    const catalogRefresh = pickerWasEnabled !== pickerIsEnabled
-      || authlessWasEnabled !== authlessIsEnabled
-      || clientCompactionWasEnabled !== clientCompactionIsEnabled
+    const fastRowsIsEnabled = config.fastRows !== false;
+    const fastRowsChanged = fastRowsWasEnabled !== fastRowsIsEnabled;
+    const desktopSwitchesChanged = authlessWasEnabled !== authlessIsEnabled
+      || clientCompactionWasEnabled !== clientCompactionIsEnabled;
+    // Catalog convergence is not config injection, and the comment that used to sit here said
+    // it was. `convergeCodexCatalog` rejects any scope but `catalog` and never reaches the
+    // injector, which is why flipping either switch left `config.toml` in its old shape until
+    // a separate `ocx sync` (#4809). Both halves are needed when a Desktop switch changes; a
+    // picker-only update still refreshes just the catalog.
+    const catalogRefresh = pickerWasEnabled !== pickerIsEnabled || desktopSwitchesChanged || fastRowsChanged
       ? await convergeCodexCatalog()
       : undefined;
+    if (fastRowsChanged) {
+      const { readRuntimePort } = await import("../../config/process-state");
+      const runtime = (deps.readRuntimePort ?? readRuntimePort)(process.pid);
+      await syncEnabledClientIntegrations(runtime?.port, config, deps);
+    }
+    // Injection second, matching `syncModelsToCodex`: the injected `model_catalog_json` should
+    // point at a catalog that has already settled. And it runs here rather than inside the save
+    // because coordinated Codex writes acquire the Codex write lock N before the config mutation
+    // lock C — awaiting N while still holding C would invert that order.
+    const desktopSwitchApply: CodexDesktopSwitchApply = desktopSwitchesChanged
+      ? await applyCodexDesktopSwitches(config)
+      : { applied: false, reason: "not_requested", retryable: false };
+    const codexDesktopSwitches = describeCodexDesktopSwitches(config, desktopSwitchApply);
     const catalogRefreshPending = catalogRefresh
       ? catalogRefreshIsPending(catalogRefresh)
       : false;
@@ -636,9 +680,11 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       codexQuotaAutoRefresh: quotaAutoRefreshSettings(config),
       oauthOpenBrowser: config.oauthOpenBrowser !== false,
       catalogRefreshPending,
-      showCodexSparkQuota: config.showCodexSparkQuota === true,
+      fastRows: config.fastRows !== false,
       codexDesktopAuthless: authlessIsEnabled,
       codexClientCompaction: clientCompactionIsEnabled,
+      codexDesktopSwitches,
+      compactionRouting: config.compactionRouting ?? null,
       codexMainAccountHardLock: config.codexMainAccountHardLock === true,
       mainAccountHardLock: getMainAccountHardLockStatus(config),
       startupHealth: await readStartupHealth(config),
@@ -820,8 +866,8 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
     if (body.vision && (body.vision.model !== undefined || body.vision.reasoning !== undefined)) {
       visionReasoningTouched = true;
       const model = typeof body.vision.model === "string"
-        ? (body.vision.model === "" ? "gpt-5.4-mini" : body.vision.model)
-        : (config.visionSidecar?.model || "gpt-5.4-mini");
+        ? (body.vision.model === "" ? "gpt-5.6-luna" : body.vision.model)
+        : (config.visionSidecar?.model || "gpt-5.6-luna");
       const sourceReasoning = body.vision.reasoning ?? config.visionSidecar?.reasoning;
       normalizedVisionReasoning = sourceReasoning === undefined
         ? undefined

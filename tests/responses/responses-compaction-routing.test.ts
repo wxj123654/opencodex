@@ -1,3 +1,4 @@
+import { getAccountQuotaHistory } from "../../src/codex/quota";
 import { clearComboSelectionState, clearComboTargetCooldowns } from "../../src/combos";
 import { sessionLaneIdFromRequest } from "../../src/server/request-log-conversation";
 /**
@@ -6,7 +7,7 @@ import { sessionLaneIdFromRequest } from "../../src/server/request-log-conversat
  * contract; every other gateway has to be driven as a plain summarizer, or Codex
  * fatals on a compaction turn that came back as an ordinary message.
  */
-import { afterEach, describe, expect, jest, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, jest, spyOn, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -41,110 +42,23 @@ import type { OcxConfig, OcxProviderConfig } from "../../src/types";
 import { clearComboRecallForTests, recallComboForLane, rememberComboForLane } from "../../src/server/responses/combo-session-recall";
 import { captureConfigGeneration } from "../../src/lib/state-store-sweeper";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { baseCompactionBody, compactionRequest, completedPayload, jsonResponse, keyProviderConfig, nativePoolConfig, sseResponse, twoAccountPoolConfig } from "../helpers/compaction-routing-fixtures";
+import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 
 const originalFetch = globalThis.fetch;
 
+// A case that calls a handler directly never runs startServer, so it never takes the
+// spend-journal writer lease and its dispatch is refused before it reaches its own contract.
+// Taken per dispatching block rather than for the whole file: five cases install a home of their
+// own inside the case body, and a lease binds the directory in effect when it was taken.
+let releaseSpendHome: (() => void) | undefined;
+const takeSpendHome = (): void => { releaseSpendHome ??= acquireOwnedSpendHome(); };
+const dropSpendHome = (): void => { releaseSpendHome?.(); releaseSpendHome = undefined; };
+
 afterEach(() => {
+  dropSpendHome();
   globalThis.fetch = originalFetch;
 });
-
-function keyProviderConfig(overrides: Partial<OcxProviderConfig> = {}): OcxConfig {
-  return {
-    defaultProvider: "gw",
-    providers: {
-      gw: {
-        adapter: "openai-responses",
-        baseUrl: "https://gateway.example/v1",
-        authMode: "key",
-        apiKey: "test-key",
-        ...overrides,
-      },
-    },
-  } as unknown as OcxConfig;
-}
-
-function nativePoolConfig(): OcxConfig {
-  return {
-    defaultProvider: "openai",
-    activeCodexAccountId: "pool-a",
-    providers: {
-      openai: {
-        adapter: "openai-responses",
-        baseUrl: "https://chatgpt.com/backend-api/codex",
-        authMode: "forward",
-        codexAccountMode: "pool",
-      },
-    },
-    codexAccounts: [{
-      id: "pool-a",
-      email: "pool@example.test",
-      isMain: false,
-      chatgptAccountId: "pool_acc",
-    }],
-  } as OcxConfig;
-}
-
-/** Two-account pool: the alternate-attempt tests need somewhere for the retry to go. */
-function twoAccountPoolConfig(): OcxConfig {
-  const config = nativePoolConfig();
-  config.codexAccounts = [
-    { id: "pool-a", email: "a@example.test", isMain: false, chatgptAccountId: "pool_acc_a" },
-    { id: "pool-b", email: "b@example.test", isMain: false, chatgptAccountId: "pool_acc_b" },
-  ] as OcxConfig["codexAccounts"];
-  return config;
-}
-
-function compactionRequest(
-  body: Record<string, unknown>,
-  signal?: AbortSignal,
-  extraHeaders: Record<string, string> = {},
-): Request {
-  return new Request("http://localhost/v1/responses", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...extraHeaders },
-    body: JSON.stringify(body),
-    signal,
-  });
-}
-
-function baseCompactionBody(extra: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    model: "gw/some-model",
-    stream: false,
-    input: [
-      { type: "message", role: "user", content: [{ type: "input_text", text: "earlier turn" }] },
-      { type: "compaction_trigger" },
-    ],
-    tools: [{ type: "function", name: "shell" }],
-    tool_choice: "auto",
-    parallel_tool_calls: true,
-    ...extra,
-  };
-}
-
-function jsonResponse(payload: unknown): Response {
-  return new Response(JSON.stringify(payload), {
-    status: 200,
-    headers: { "content-type": "application/json" },
-  });
-}
-
-function completedPayload(text: string): Record<string, unknown> {
-  return {
-    id: "resp_1",
-    status: "completed",
-    output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text }] }],
-    usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
-  };
-}
-
-function sseResponse(events: Array<Record<string, unknown>>): Response {
-  const body = events.map(e => `event: ${String(e.type)}\ndata: ${JSON.stringify(e)}\n\n`).join("");
-  return new Response(body, {
-    status: 200,
-    headers: { "content-type": "text/event-stream" },
-  });
-}
 
 describe("supportsNativeResponsesCompactEndpoint (#422)", () => {
   const canonicalForward = {
@@ -182,6 +96,7 @@ describe("supportsNativeResponsesCompactEndpoint (#422)", () => {
 });
 
 describe("Codex auth-context error parity (#2392)", () => {
+  beforeEach(takeSpendHome);
   const cases: Array<{
     label: string;
     createError: () => Error;
@@ -343,6 +258,7 @@ describe("Codex auth-context error parity (#2392)", () => {
 });
 
 describe("native compact usage reporting", () => {
+  beforeEach(takeSpendHome);
   test("the buffered upstream body fills the request log usage and stays intact for the client", async () => {
     const config = {
       defaultProvider: "openai-apikey",
@@ -373,6 +289,9 @@ describe("native compact usage reporting", () => {
     const previousOpencodexHome = process.env.OPENCODEX_HOME;
     const previousCodexHome = process.env.CODEX_HOME;
     process.env.OPENCODEX_HOME = testDir;
+    // This case serves from its own directory, so the block lease cannot cover it.
+    dropSpendHome();
+    takeSpendHome();
     process.env.CODEX_HOME = testDir;
     try {
       const mainConfig = nativePoolConfig();
@@ -401,6 +320,8 @@ describe("native compact usage reporting", () => {
     } finally {
       globalThis.fetch = originalFetch;
       clearAccountQuota();
+      // Released before the directory holding it is removed.
+      dropSpendHome();
       removeTreeWithRetry(testDir);
       if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = previousOpencodexHome;
@@ -411,7 +332,8 @@ describe("native compact usage reporting", () => {
 });
 
 describe("native Codex pool compaction", () => {
-  test("keeps a Spark reset cooldown separate from a Terra compact request (#590)", async () => {
+  beforeEach(takeSpendHome);
+  test("ignores a retired Spark reset without cooling later compact requests", async () => {
     const testDir = mkdtempSync(join(tmpdir(), "ocx-compact-scope-"));
     const previousOpencodexHome = process.env.OPENCODEX_HOME;
     const previousCodexHome = process.env.CODEX_HOME;
@@ -420,6 +342,9 @@ describe("native Codex pool compaction", () => {
     let sparkPhase = true;
     try {
       process.env.OPENCODEX_HOME = testDir;
+      // This case serves from its own directory, so the block lease cannot cover it.
+      dropSpendHome();
+      takeSpendHome();
       process.env.CODEX_HOME = testDir;
       clearCodexUpstreamHealth();
       saveCodexAccountCredential("pool-a", {
@@ -459,7 +384,7 @@ describe("native Codex pool compaction", () => {
         config,
         { model: "", provider: "" },
       );
-      expect(cooledSpark.status).toBe(429);
+      expect(cooledSpark.status).toBe(200);
 
       const terra = await handleResponsesCompact(
         compactionRequest(baseCompactionBody({ model: "gpt-5.6-terra" })),
@@ -470,6 +395,8 @@ describe("native Codex pool compaction", () => {
     } finally {
       globalThis.fetch = originalFetch;
       clearCodexUpstreamHealth();
+      // Released before the directory holding it is removed.
+      dropSpendHome();
       removeTreeWithRetry(testDir);
       if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = previousOpencodexHome;
@@ -478,7 +405,7 @@ describe("native Codex pool compaction", () => {
     }
   });
 
-  test("a cancelled Spark recovery probe releases its compact lease (#590)", async () => {
+  test("a cancelled shared recovery probe releases its compact lease (#590)", async () => {
     const testDir = mkdtempSync(join(tmpdir(), "ocx-compact-probe-"));
     const previousOpencodexHome = process.env.OPENCODEX_HOME;
     const previousCodexHome = process.env.CODEX_HOME;
@@ -493,6 +420,9 @@ describe("native Codex pool compaction", () => {
     const bodyReleased = new Promise<void>(resolve => { releaseBody = resolve; });
     try {
       process.env.OPENCODEX_HOME = testDir;
+      // This case serves from its own directory, so the block lease cannot cover it.
+      dropSpendHome();
+      takeSpendHome();
       process.env.CODEX_HOME = testDir;
       Date.now = () => now;
       clearCodexUpstreamHealth();
@@ -505,7 +435,7 @@ describe("native Codex pool compaction", () => {
       recordCodexUpstreamOutcome(config, "pool-a", 429, {
         now,
         resetAt: Math.floor((now + 4 * 24 * 60 * 60_000) / 1_000),
-        modelId: "gpt-5.3-codex-spark",
+        modelId: "gpt-5.6-sol",
       });
       Date.now = () => probeAt;
       globalThis.fetch = (async () => new Response(new ReadableStream<Uint8Array>({
@@ -517,7 +447,7 @@ describe("native Codex pool compaction", () => {
         },
       }), { status: 200, headers: { "content-type": "application/json" } })) as typeof fetch;
       const pending = handleResponsesCompact(
-        compactionRequest(baseCompactionBody({ model: "gpt-5.3-codex-spark" }), abort.signal),
+        compactionRequest(baseCompactionBody({ model: "gpt-5.6-sol" }), abort.signal),
         config,
         { model: "", provider: "" },
       );
@@ -532,14 +462,16 @@ describe("native Codex pool compaction", () => {
         new Headers({ authorization: "Bearer main-token" }),
         config,
         "pool",
-        { modelId: "gpt-5.3-codex-spark" },
+        { modelId: "gpt-5.6-sol" },
       );
-      expect(nextProbe).toMatchObject({ probeQuotaScope: "spark" });
+      expect(nextProbe).toMatchObject({ probeQuotaScope: "shared" });
       releaseCodexAuthContextProbeLease(nextProbe);
     } finally {
       Date.now = originalNow;
       globalThis.fetch = originalFetch;
       clearCodexUpstreamHealth();
+      // Released before the directory holding it is removed.
+      dropSpendHome();
       removeTreeWithRetry(testDir);
       if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = previousOpencodexHome;
@@ -548,7 +480,7 @@ describe("native Codex pool compaction", () => {
     }
   });
 
-  test("a Spark recovery probe releases its compact lease when connect is cancelled (#590)", async () => {
+  test("a shared recovery probe releases its compact lease when connect is cancelled (#590)", async () => {
     const testDir = mkdtempSync(join(tmpdir(), "ocx-compact-connect-probe-"));
     const previousOpencodexHome = process.env.OPENCODEX_HOME;
     const previousCodexHome = process.env.CODEX_HOME;
@@ -561,6 +493,9 @@ describe("native Codex pool compaction", () => {
     const fetchStarted = new Promise<void>(resolve => { markFetchStarted = resolve; });
     try {
       process.env.OPENCODEX_HOME = testDir;
+      // This case serves from its own directory, so the block lease cannot cover it.
+      dropSpendHome();
+      takeSpendHome();
       process.env.CODEX_HOME = testDir;
       Date.now = () => now;
       clearCodexUpstreamHealth();
@@ -573,7 +508,7 @@ describe("native Codex pool compaction", () => {
       recordCodexUpstreamOutcome(config, "pool-a", 429, {
         now,
         resetAt: Math.floor((now + 4 * 24 * 60 * 60_000) / 1_000),
-        modelId: "gpt-5.3-codex-spark",
+        modelId: "gpt-5.6-sol",
       });
       Date.now = () => probeAt;
       globalThis.fetch = ((_url: string | URL | Request, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
@@ -583,7 +518,7 @@ describe("native Codex pool compaction", () => {
         markFetchStarted();
       })) as typeof fetch;
       const pending = handleResponsesCompact(
-        compactionRequest(baseCompactionBody({ model: "gpt-5.3-codex-spark" }), abort.signal),
+        compactionRequest(baseCompactionBody({ model: "gpt-5.6-sol" }), abort.signal),
         config,
         { model: "", provider: "" },
       );
@@ -597,14 +532,16 @@ describe("native Codex pool compaction", () => {
         new Headers({ authorization: "Bearer main-token" }),
         config,
         "pool",
-        { modelId: "gpt-5.3-codex-spark" },
+        { modelId: "gpt-5.6-sol" },
       );
-      expect(nextProbe).toMatchObject({ probeQuotaScope: "spark" });
+      expect(nextProbe).toMatchObject({ probeQuotaScope: "shared" });
       releaseCodexAuthContextProbeLease(nextProbe);
     } finally {
       Date.now = originalNow;
       globalThis.fetch = originalFetch;
       clearCodexUpstreamHealth();
+      // Released before the directory holding it is removed.
+      dropSpendHome();
       removeTreeWithRetry(testDir);
       if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = previousOpencodexHome;
@@ -615,6 +552,7 @@ describe("native Codex pool compaction", () => {
 });
 
 describe("routed compaction for key-mode openai-responses (#422)", () => {
+  beforeEach(takeSpendHome);
   test("rewrites the wire: no trigger, no tools, summarizer prompt present", async () => {
     const bodies: Array<Record<string, unknown>> = [];
     globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
@@ -735,6 +673,7 @@ describe("routed compaction for key-mode openai-responses (#422)", () => {
 });
 
 describe("bare native compaction model without canonical openai (#2901)", () => {
+  beforeEach(takeSpendHome);
   /** A GitHub-Copilot-style operator: one third-party provider, no `openai` row at all. */
   function copilotOnlyConfig(): OcxConfig {
     return {
@@ -841,6 +780,7 @@ describe("bare native compaction model without canonical openai (#2901)", () => 
 });
 
 describe("compaction terminal handling (#422)", () => {
+  beforeEach(takeSpendHome);
   test("an upstream failure does not become an empty compaction", async () => {
     globalThis.fetch = (async () => jsonResponse({
       id: "resp_1",
@@ -923,11 +863,15 @@ describe("compaction terminal handling (#422)", () => {
  * fired, three means it recursed.
  */
 describe("compact alternate-account attempt (#913)", () => {
+  beforeEach(takeSpendHome);
   function withPoolEnv<T>(name: string, run: (config: OcxConfig) => Promise<T>): Promise<T> {
     const testDir = mkdtempSync(join(tmpdir(), name));
     const previousOpencodexHome = process.env.OPENCODEX_HOME;
     const previousCodexHome = process.env.CODEX_HOME;
     process.env.OPENCODEX_HOME = testDir;
+    // This case serves from its own directory, so the block lease cannot cover it.
+    dropSpendHome();
+    takeSpendHome();
     process.env.CODEX_HOME = testDir;
     clearCodexUpstreamHealth();
     clearUpstreamHostHealth();
@@ -946,6 +890,8 @@ describe("compact alternate-account attempt (#913)", () => {
       clearCodexUpstreamHealth();
       clearUpstreamHostHealth();
       clearAccountQuota();
+      // Released before the directory holding it is removed.
+      dropSpendHome();
       removeTreeWithRetry(testDir);
       if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = previousOpencodexHome;
@@ -1229,6 +1175,43 @@ describe("compact alternate-account attempt (#913)", () => {
     });
   });
 
+  test("ordinary pooled HTTP responses publish their captured quota history writer", async () => {
+    await withPoolEnv("ocx-http-history-", async config => {
+      globalThis.fetch = (async () => Response.json(completedPayload("ordinary history"), {
+        headers: { "x-codex-primary-used-percent": "31", "x-codex-primary-window-minutes": "10080" },
+      })) as typeof fetch;
+      const response = await handleResponses(compactionRequest({ model: "gpt-5.5", input: [{ role: "user", content: "hello" }], stream: false }), config, { model: "", provider: "" });
+      expect(response.status).toBe(200);
+      await response.text();
+      expect(getAccountQuotaHistory("pool-a").observations).toHaveLength(1);
+      expect(getAccountQuotaHistory("pool-a").observations[0].windows[0].usedPercent).toBe(31);
+    });
+  });
+
+  test.each([false, true])("compact final quota history follows the serving account with alternate=%s", async alternate => {
+    await withPoolEnv("ocx-compact-history-", async config => {
+      let calls = 0;
+      globalThis.fetch = (async () => {
+        calls++;
+        const rejected = alternate && calls === 1;
+        return Response.json(rejected ? { error: { message: "pool exhausted" } } : completedPayload("history compact"), {
+          status: rejected ? 429 : 200,
+          headers: { "x-codex-primary-used-percent": rejected ? "100" : "25", "x-codex-primary-window-minutes": "10080" },
+        });
+      }) as typeof fetch;
+      const response = await handleResponsesCompact(compactionRequest(baseCompactionBody({})), config, { model: "", provider: "" });
+      expect(response.status).toBe(200);
+      await response.text();
+      const first = getAccountQuotaHistory("pool-a").observations;
+      expect(first).toHaveLength(1);
+      expect(first[0].windows[0].usedPercent).toBe(alternate ? 100 : 25);
+      const second = getAccountQuotaHistory("pool-b").observations;
+      expect(second).toHaveLength(alternate ? 1 : 0);
+      if (alternate) expect(second[0].windows[0].usedPercent).toBe(25);
+      expect(calls).toBe(alternate ? 2 : 1);
+    });
+  });
+
   test("canonical trailing slashes are pinned before native compact sends pool credentials", async () => {
     await withPoolEnv("ocx-compact-canonical-url-", async config => {
       config.providers.openai!.baseUrl = "https://chatgpt.com/backend-api/codex///";
@@ -1443,6 +1426,9 @@ describe("compact alternate-account attempt (#913)", () => {
         models: ["gpt-5.6-sol"],
       };
       const headers = { "x-codex-parent-thread-id": "compact-routed-handoff-thread" };
+      // The remembered route is keyed by the admitted principal, so every call in
+      // this scenario authenticates as the same configured client.
+      const admission = { kind: "configured", keyId: "compact-client", source: "dedicated", contextPrincipalId: "compact-client-principal" } as const;
       const calls: Array<{ model: string; nativeCompact: boolean }> = [];
       globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
         const url = typeof input === "string"
@@ -1467,8 +1453,7 @@ describe("compact alternate-account attempt (#913)", () => {
           undefined,
           headers,
         ),
-        config,
-        { model: "", provider: "" },
+        config, { model: "", provider: "" }, undefined, admission,
       );
       expect(manual.status).toBe(200);
       expect(calls).toEqual([{ model: "deepseek-v4-flash", nativeCompact: false }]);
@@ -1480,8 +1465,7 @@ describe("compact alternate-account attempt (#913)", () => {
           undefined,
           { "x-codex-parent-thread-id": "different-compact-thread" },
         ),
-        config,
-        { model: "", provider: "" },
+        config, { model: "", provider: "" }, undefined, admission,
       );
       expect(unrelated.status).toBe(502);
       expect(calls.length).toBeGreaterThan(0);
@@ -1495,8 +1479,7 @@ describe("compact alternate-account attempt (#913)", () => {
           undefined,
           headers,
         ),
-        config,
-        logCtx,
+        config, logCtx, undefined, admission,
       );
 
       expect(automatic.status).toBe(200);
@@ -1783,6 +1766,7 @@ describe("compact alternate-account attempt (#913)", () => {
 });
 
 describe("compaction combo recall after combo switch (#3891)", () => {
+  beforeEach(takeSpendHome);
   afterEach(() => clearComboRecallForTests());
 
   function comboTestConfig(): OcxConfig {
@@ -2232,6 +2216,7 @@ test("a no-eligible policy compact request persists the evaluation trace", async
  * already degrade an unpaired output to "[tool output for unknown call]" on their own.
  */
 describe("computer screenshot output translation boundary", () => {
+  beforeEach(takeSpendHome);
   const screenshot = {
     type: "computer_call_output", call_id: "call_screen",
     output: { type: "computer_screenshot", image_url: "https://example.com/screen.png" },
@@ -2244,7 +2229,10 @@ describe("computer screenshot output translation boundary", () => {
   test("rejects before an otherwise active vision description", async () => {
     const config = keyProviderConfig({ adapter: "openai-chat", noVisionModels: ["model"] });
     config.visionSidecar = { enabled: true, backend: "routed", model: "vision/seeing" };
-    config.providers.vision = { adapter: "openai-chat", baseUrl: "https://vision.example/v1", apiKey: "test-key" };
+    config.providers.vision = {
+      adapter: "openai-chat", baseUrl: "https://vision.example/v1", apiKey: "test-key",
+      modelInputModalities: { seeing: ["text", "image"] },
+    };
     // Routed vision needs no live OpenAI account for this controlled description dependency.
     const resolveAuth = spyOn(visionModule, "shouldResolveOpenAiVisionSidecar").mockReturnValue(false);
     const describe = spyOn(visionModule, "describeImagesInPlace").mockImplementation(async () => {});
@@ -2327,9 +2315,14 @@ describe("computer screenshot output translation boundary", () => {
 });
 
 describe("external task-input envelopes (#3735)", () => {
-  // Synthetic charset/length fixture: short plaintext in this slot is deliberately
-  // normalized to input_text before parsing, so it cannot exercise opaque rejection.
-  const opaqueOutput = `g${"A".repeat(127)}`;
+  beforeEach(takeSpendHome);
+  const opaqueOutput = `${Buffer.concat([
+    Buffer.from([0x80]),
+    Buffer.alloc(8),
+    Buffer.alloc(16),
+    Buffer.alloc(16),
+    Buffer.alloc(32),
+  ]).toString("base64url")}==`;
   const external = (output: unknown = "external task input") => ({
     type: "function_call_output", id: "external-fixture", name: "handoff_input", namespace: "task_inbox", output,
   });
@@ -2337,8 +2330,9 @@ describe("external task-input envelopes (#3735)", () => {
     model: "gw/model", stream: false, input: [item],
   });
 
-  test("opaque negative fixtures survive the plaintext-slot classifier", () => {
+  test("only canonical Fernet structure survives the plaintext-slot classifier", () => {
     expect(looksLikeBackendCiphertext(opaqueOutput)).toBe(true);
+    expect(looksLikeBackendCiphertext(`gAAAAA${"A".repeat(189)}`)).toBe(false);
   });
 
   test("sends a complete envelope as user text without an orphan-tool marker", async () => {
@@ -2438,6 +2432,7 @@ describe("external task-input envelopes (#3735)", () => {
 });
 
 describe("established-history external task input (#3807)", () => {
+  beforeEach(takeSpendHome);
   // Synthetic complete envelope from the #3735 contract; #3807's history rendering
   // is not a captured outbound request. Keep the real tool pair distinct from delivery.
   const deliveryText = "  Follow up on the earlier tool result.\n";
@@ -2572,6 +2567,7 @@ describe("established-history external task input (#3807)", () => {
 });
 
 describe("unpaired tool result boundary (#3259)", () => {
+  beforeEach(takeSpendHome);
   function unpairedBody(item: Record<string, unknown>): Record<string, unknown> {
     return {
       model: "gw/some-model",
@@ -2689,6 +2685,7 @@ describe("unpaired tool result boundary (#3259)", () => {
 });
 
 describe("unusable-call_id task-input seed (#3807)", () => {
+  beforeEach(takeSpendHome);
   const seed = (extra: Record<string, unknown>) => ({
     type: "function_call_output", id: "fc_seed", name: "create_thread", namespace: "codex",
     output: "<codex_delegation>continue</codex_delegation>", ...extra,

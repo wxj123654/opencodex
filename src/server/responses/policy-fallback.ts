@@ -1,7 +1,7 @@
 import { comboFailureDecision } from "../../combos/failover";
 import { readBoundedResponseBody } from "../../lib/bounded-body";
-import { readJsonRequestBody, resolveInboundBodyLimitBytes } from "../request-decompress";
 import { finishRequestAttempt, type RequestLogContext } from "../request-log";
+import { linkRequestSessionLane } from "../request-log-conversation";
 import type { OcxConfig } from "../../types";
 import type { RouteCandidateTrace, RouteDecisionTraceV1 } from "../../routing/trace";
 import { handleResponses as handleResponsesCore } from "./core";
@@ -56,12 +56,17 @@ function requestWithCandidate(
   headers.delete("content-encoding");
   headers.delete("content-length");
   headers.set("content-type", "application/json");
-  return new Request(req.url, {
+  const retryRequest = new Request(req.url, {
     method: req.method,
     headers,
     body: JSON.stringify({ ...rawBody, model: `${candidate.provider}/${candidate.model}` }),
     signal: req.signal,
   });
+  // A sessionless request keeps the lane it was already allocated. Without this the second
+  // candidate reaches OpenCode Go under a different x-opencode-session than the first attempt,
+  // which is the same conversation split the header exists to prevent.
+  linkRequestSessionLane(req, retryRequest);
+  return retryRequest;
 }
 
 function errorCodeFromText(text: string): string | undefined {
@@ -123,6 +128,7 @@ export async function handleResponsesWithPolicyFallback(
   const runCore = deps.runCore ?? handleResponsesCore;
   let requestBodyReadNotified = false;
   let storedPool401ReplayDispatched = false;
+  let rawBody: Record<string, unknown> | null = null;
   const coreOptions: CoreOptions = {
     ...options,
     openAiSidecarAuth: options.openAiSidecarAuth === undefined
@@ -138,23 +144,15 @@ export async function handleResponsesWithPolicyFallback(
         options.onRequestBodyRead?.();
       },
     } : {}),
+    onRequestBodyParsed: body => {
+      options.onRequestBodyParsed?.(body);
+      if (body && typeof body === "object" && !Array.isArray(body)) rawBody = body as Record<string, unknown>;
+    },
     onStoredPool401ReplayDispatched: () => {
       storedPool401ReplayDispatched = true;
       options.onStoredPool401ReplayDispatched?.();
     },
   };
-  let rawBody: Record<string, unknown> | null = null;
-  try {
-    const parsed = await readJsonRequestBody(
-      req.clone(),
-      undefined,
-      resolveInboundBodyLimitBytes(config.maxInboundBodyBytes),
-    );
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) rawBody = parsed as Record<string, unknown>;
-  } catch {
-    // Core owns the client-facing parse/decompression error.
-  }
-
   let response: Response;
   try {
     response = await runCore(req, config, logCtx, coreOptions);

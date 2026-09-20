@@ -15,10 +15,15 @@ import type { RequestLogContext } from "../../src/server/request-log";
 import { handleResponses } from "../../src/server/responses";
 import type { OcxConfig } from "../../src/types";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 import { CodexWsMetadata } from "../../src/server/responses/codex-ws-metadata";
-import { applyAccountQuotaFromUpstreamHeaders } from "../../src/codex/quota";
+import { applyAccountQuotaFromUpstreamHeaders, getAccountQuotaHistory } from "../../src/codex/quota";
 
 const originalFetch = globalThis.fetch;
+let releaseSpendHome: (() => void) | undefined;
+
+// Taken only by callbacks that physically dispatch, after withPoolHome installs their home.
+const takeSpendHome = (): void => { releaseSpendHome = acquireOwnedSpendHome(); };
 
 function poolConfig(accountIds: string[]): OcxConfig {
   return {
@@ -80,6 +85,9 @@ async function withPoolHome<T>(run: (home: string) => Promise<T>): Promise<T> {
   try {
     return await run(home);
   } finally {
+    // Released before the helper removes or restores the home so its lease cannot outlive it.
+    releaseSpendHome?.();
+    releaseSpendHome = undefined;
     globalThis.fetch = originalFetch;
     clearCodexUpstreamHealth();
     clearThreadAccountMap();
@@ -133,6 +141,7 @@ describe("Responses account usage attribution", () => {
     const originalWebSocket = globalThis.WebSocket;
     try {
       await withPoolHome(async home => {
+        takeSpendHome();
         writeFileSync(join(home, "auth.json"), JSON.stringify({
           tokens: { access_token: "main-access-token", account_id: "main-account" },
         }));
@@ -183,6 +192,8 @@ describe("Responses account usage attribution", () => {
           await response.text();
           expect(getAccountQuota(accountId)?.weeklyPercent).toBe(20);
           expect(getAccountQuota("untouched-account")?.weeklyPercent).toBe(7);
+          expect(getAccountQuotaHistory(accountId).observations.map(row => row.windows[0].usedPercent))
+            .toEqual(accountId === MAIN_CODEX_ACCOUNT_ID ? [] : [10, 20]);
         }
       });
     } finally {
@@ -196,6 +207,7 @@ describe("Responses account usage attribution", () => {
     const finalQuotaAllowed = new Promise<void>(resolve => { releaseFinalQuota = resolve; });
     try {
       await withPoolHome(async () => {
+        takeSpendHome();
         savePoolCredential("pool-ws-replaced");
         class MetadataSocket {
           listeners = new Map<string, Array<(event: unknown) => void>>();
@@ -235,6 +247,7 @@ describe("Responses account usage attribution", () => {
           codexWsRuntimeIdentity: "1.4.0",
         });
         expect(getAccountQuota("pool-ws-replaced")?.weeklyPercent).toBe(10);
+        expect(getAccountQuotaHistory("pool-ws-replaced").observations.map(row => row.windows[0].usedPercent)).toEqual([10]);
 
         savePoolCredential("pool-ws-replaced");
         clearAccountQuota("pool-ws-replaced");
@@ -242,6 +255,7 @@ describe("Responses account usage attribution", () => {
         await response.text();
 
         expect(getAccountQuota("pool-ws-replaced")).toBeNull();
+        expect(getAccountQuotaHistory("pool-ws-replaced").observations).toEqual([]);
       });
     } finally {
       releaseFinalQuota();
@@ -251,6 +265,7 @@ describe("Responses account usage attribution", () => {
 
   test("main-pool and legacy added accounts carry their effective labels", async () => {
     await withPoolHome(async home => {
+      takeSpendHome();
       writeFileSync(join(home, "auth.json"), JSON.stringify({
         tokens: { access_token: "main-access-token", account_id: "main-account" },
       }));
@@ -276,6 +291,7 @@ describe("Responses account usage attribution", () => {
 
   test("a pre-stream quota retry updates attribution to the serving alternate account", async () => {
     await withPoolHome(async () => {
+      takeSpendHome();
       const config = poolConfig(["pool-a", "pool-b"]);
       for (const id of ["pool-a", "pool-b"]) {
         savePoolCredential(id);
@@ -306,6 +322,7 @@ describe("Responses account usage attribution", () => {
 
   test("a quota message wrapped in HTTP 502 cools the account and retries an alternate", async () => {
     await withPoolHome(async () => {
+      takeSpendHome();
       const config = poolConfig(["pool-a", "pool-b"]);
       for (const id of ["pool-a", "pool-b"]) {
         savePoolCredential(id);
@@ -340,8 +357,36 @@ describe("Responses account usage attribution", () => {
     });
   });
 
+  // Pool health reads a 429 as the account saying it is out of quota. The replay refusal wears
+  // the same status but no upstream produced it, so recording it would cool a credential that
+  // refused nothing -- and the cooldown outlives the request that invented it.
+  test("a refused reset replay is not quota evidence and invites no client retry", async () => {
+    await withPoolHome(async () => {
+      takeSpendHome();
+      const config = poolConfig(["pool-a"]);
+      savePoolCredential("pool-a");
+      updateAccountQuota("pool-a", 10);
+      let sends = 0;
+      globalThis.fetch = (async () => {
+        sends += 1;
+        throw Object.assign(new Error("The socket connection was closed unexpectedly."), { code: "ECONNRESET" });
+      }) as typeof fetch;
+
+      const response = await handleResponses(request(), config, { model: "", provider: "" }, {});
+
+      expect(response.status).toBe(429);
+      expect(sends).toBe(1);
+      expect((await response.json() as { error?: { code?: string } }).error?.code)
+        .toBe("upstream_reset_replay_refused");
+      expect(response.headers.get("Retry-After")).toBeNull();
+      expect(getCodexUpstreamHealth("pool-a")?.lastFailureStatus).toBeUndefined();
+      expect(getCodexUpstreamHealth("pool-a")?.cooldownUntil).toBeUndefined();
+    });
+  });
+
   test("a wrapped quota failure cools a sole account when no alternate exists", async () => {
     await withPoolHome(async () => {
+      takeSpendHome();
       const config = poolConfig(["pool-a"]);
       savePoolCredential("pool-a");
       updateAccountQuota("pool-a", 10);

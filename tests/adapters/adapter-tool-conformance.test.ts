@@ -448,10 +448,16 @@ describe("registry-derived routed tool conformance", () => {
   // CLI-carried adapters (qoder/codebuddy stream-json) have no HTTP wire driver:
   // the vendor process owns the transport, so these conformance suites skip them.
   const TOOL_LESS_ADAPTERS = new Set(["codebuddy", "qoder"]);
+  // The Devin adapter is runTurn-only: it streams Connect-RPC from runTurn, so
+  // buildRequest returns a placeholder and tools never travel the wire path.
+  // Both Devin provider rows share it and differ only in where the credential
+  // came from.
+  const RUN_TURN_ONLY_WIRES = new Set(["devin"]);
 
   test("every registered adapter keeps the nested apply_patch helper in its final request", async () => {
     for (const [adapterId] of adapterDefinitions()) {
       if (TOOL_LESS_ADAPTERS.has(adapterId)) continue;
+      if (RUN_TURN_ONLY_WIRES.has(effectiveAdapterContract(adapterId).wire)) continue;
       const contract = effectiveAdapterContract(adapterId);
       const body = await outbound(adapterId, codeModeParsed(contract.wire));
       const advertised = advertisedToolNames(contract.wire, body);
@@ -466,6 +472,7 @@ describe("registry-derived routed tool conformance", () => {
   test("tool_choice none disables every registered adapter's callable tool surface", async () => {
     for (const [adapterId] of adapterDefinitions()) {
       if (TOOL_LESS_ADAPTERS.has(adapterId)) continue;
+      if (RUN_TURN_ONLY_WIRES.has(effectiveAdapterContract(adapterId).wire)) continue;
       const contract = effectiveAdapterContract(adapterId);
       const enabledBody = await outbound(adapterId, toolChoiceParsed(contract.wire));
       expect(advertisedToolNames(contract.wire, enabledBody).length, `${adapterId}:enabled`).toBeGreaterThan(0);
@@ -477,9 +484,10 @@ describe("registry-derived routed tool conformance", () => {
   test("every parsed streaming wire restores hostile freeform input exactly", async () => {
     for (const [adapterId] of adapterDefinitions()) {
       if (TOOL_LESS_ADAPTERS.has(adapterId)) continue;
+      if (RUN_TURN_ONLY_WIRES.has(effectiveAdapterContract(adapterId).wire)) continue;
       const contract = effectiveAdapterContract(adapterId);
       const driver = TOOL_WIRE_DRIVERS[contract.wire];
-      if (!driver.streamingToolCall) {
+      if (!driver?.streamingToolCall) {
         // Adapters whose transport is a runTurn stream (Cursor, Devin HTTP) never route through
         // parseStream here; their stream mapping is covered by focused adapter tests.
         // OpenAI Responses is a normal passthrough that only parses routed compaction.
@@ -493,6 +501,7 @@ describe("registry-derived routed tool conformance", () => {
   test("every buffered adapter preserves same-name tools from different namespaces", async () => {
     for (const [adapterId] of adapterDefinitions()) {
       if (TOOL_LESS_ADAPTERS.has(adapterId)) continue;
+      if (RUN_TURN_ONLY_WIRES.has(effectiveAdapterContract(adapterId).wire)) continue;
       const contract = effectiveAdapterContract(adapterId);
       if (contract.wire === "openai-responses" || contract.wire === "cursor") {
         // Native Responses passthrough and Cursor's protobuf transport do not use the routed
@@ -508,6 +517,7 @@ describe("registry-derived routed tool conformance", () => {
   test("every routed adapter fails closed for an ambiguous bare selector", async () => {
     for (const [adapterId] of adapterDefinitions()) {
       if (TOOL_LESS_ADAPTERS.has(adapterId)) continue;
+      if (RUN_TURN_ONLY_WIRES.has(effectiveAdapterContract(adapterId).wire)) continue;
       const contract = effectiveAdapterContract(adapterId);
       if (contract.wire === "openai-responses" || contract.wire === "cursor") continue;
       const parsed = namespacedCollisionParsed(contract.wire);
@@ -534,9 +544,10 @@ describe("registry-derived routed tool conformance", () => {
   test("every streaming adapter restores namespaced custom/function collisions distinctly", async () => {
     for (const [adapterId] of adapterDefinitions()) {
       if (TOOL_LESS_ADAPTERS.has(adapterId)) continue;
+      if (RUN_TURN_ONLY_WIRES.has(effectiveAdapterContract(adapterId).wire)) continue;
       const contract = effectiveAdapterContract(adapterId);
       const driver = TOOL_WIRE_DRIVERS[contract.wire];
-      if (!driver.streamingToolCall || !driver.extractWireToolName) {
+      if (!driver?.streamingToolCall || !driver?.extractWireToolName) {
         expect(["openai-responses", "cursor", "devin-http"]).toContain(contract.wire);
         continue;
       }
@@ -577,7 +588,9 @@ describe("registry-derived routed tool conformance", () => {
   test("every registered adapter replays the exact apply_patch input on continuation", async () => {
     for (const [adapterId] of adapterDefinitions()) {
       if (TOOL_LESS_ADAPTERS.has(adapterId)) continue;
+      if (RUN_TURN_ONLY_WIRES.has(effectiveAdapterContract(adapterId).wire)) continue;
       const contract = effectiveAdapterContract(adapterId);
+      // Devin is a runTurn-only adapter; continuation replay is not expressed on buildRequest.
       const body = await outbound(adapterId, continuationParsed(contract.wire));
       expect(continuationInput(contract.wire, body), adapterId).toBe(PATCH);
     }

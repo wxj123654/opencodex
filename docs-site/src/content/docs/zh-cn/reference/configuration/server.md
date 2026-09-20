@@ -12,16 +12,18 @@ description: 监听、远程访问、准入密钥、超时、存储、侧车、�
 | --- | --- | --- | --- |
 | `port` | `number` | `10100` | 代理监听端口。 |
 | `hostname?` | `string` | `"127.0.0.1"` | 绑定地址。非回环绑定需要 `OPENCODEX_API_AUTH_TOKEN`。 |
-| `proxy?` | `string` | — | 出站 HTTP(S) 代理 URL，或 `${ENV_VAR}`。仅当 `HTTP_PROXY` / `HTTPS_PROXY` 未设置时才会应用；回环地址始终保留在 `NO_PROXY` 中。 |
+| `proxy?` | `string` | — | 出站 HTTP(S) 或 SOCKS5 代理 URL（`socks5://host:port`），或 `${ENV_VAR}`。HTTP URL 仅在未设置时写入 `HTTP_PROXY` / `HTTPS_PROXY`。SOCKS5 URL 使用内置的真实 SOCKS5 隧道，也会写入 `ALL_PROXY`（`ocx start --socks5`）；并清除本进程继承的 `HTTP(S)_PROXY`。回环地址始终保留在 `NO_PROXY` 中。 |
 | `emptyCompletionRetry?` | `boolean` | `false` | 显式启用：当 Responses turn 既无文本也无工具调用时，使用相同请求重试一次，包括流在终止事件之前结束的情况。重试可能产生费用。`OCX_EMPTY_COMPLETION_RETRY=0` 可在不修改配置的情况下禁用；combo 与 routed-compaction turn 不参与。 |
-| `stallTimeoutSec?` | `number` | `300` | 在上游没有数据之前可等待的秒数，超过后返回 `response.incomplete`。最小值为 1。 |
+| `dropCodexSafetyBuffering?` | `boolean` | `false` | 从 Codex Responses 透传响应中移除 Codex safety-buffering 提示：`x-codex-safety-buffering-enabled` / `x-codex-safety-buffering-faster-model` 响应头、类型为 `safety_buffering` 的 `response.metadata` SSE 事件，以及其他 SSE 事件中的 `safety_buffering` 字段。Codex TUI 会将这些提示显示为“使用更快模型重试”的提示框，其默认操作会把会话切换到较弱的模型。其他 `x-codex-*` 响应头和其他所有 SSE 事件内容均保持不变，但会移除该字段。默认关闭。 |
+| `stallTimeoutSec?` | `number` | `300` | 上游无有效进展的秒数，适用于 Responses 和原生 Chat；最小 1 秒。 |
 | `connectTimeoutMs?` | `number` | `200000` | 每次尝试的 DNS/TCP/TLS/最终响应头截止时间；它在正文生成之前结束。 |
 | `shutdownTimeoutMs?` | `number` | `5000` | 优雅停机截止时间，超过后会中止仍在进行中的请求。 |
 | `websockets?` | `boolean` | `false` | 声明并允许面向客户端的 Responses WebSocket 路径。设为 false 时客户端使用 HTTP/SSE；它不会禁用符合条件的 canonical ChatGPT 上游 WS 优化。 |
 | `corsAllowOrigins?` | `string[]` | `[]` | CORS 额外允许的精确 origin。loopback origin 始终允许；支持 `chrome-extension://<扩展 ID>` 等基于 authority 的浏览器扩展 origin，`*` 不是通配符。Firefox 和 Safari 会（每次安装/启动浏览器时）重新生成扩展 UUID，origin 变化后请更新该条目。 |
-| `apiKeys?` | `OcxApiKey[]` | `[]` | 管理平面和非回环绑定上的数据平面身份验证可接受的已生成 `ocx_…` 凭据。由仪表板管理。 |
+| `apiKeys?` | `OcxApiKey[]` | `[]` | 生成的 `ocx_…` 数据平面准入凭据（用于非回环绑定）。它们不授权管理 API；管理访问使用[管理 API 参考](/zh-cn/reference/management-api/)中说明的独立凭据。由仪表板管理。 |
 | `storageCleanupPolicy?` | `StorageCleanupPolicy` | disabled | 可选启用的归档会话清理策略。不会被隐式启用。 |
 | `appOwnedMemoryBudgetMb?` | `number` | `256` | 可逐出应用自有日志、缓存、blob 和续传载荷的内存上限，单位 MiB。范围 64–4096；不是 RSS 上限。 |
+| `metricsExport.enabled?` | `boolean` | `false` | 在经过认证的 `GET /api/metrics` 上启用进程本地的请求聚合指标。需要重启；禁用时该路径返回 404，且不会启动任何导出活动。 |
 | `codexAutoStart?` | `boolean` | `true` | 允许 Codex shim 在启动 Codex 之前运行 `ocx ensure`。设为 false 会让 ensure 变成无操作。 |
 | `codexShimAutoRestore?` | `boolean` | `true` | 在完成外部 Codex 更新并覆盖安装的 shim 之后恢复该 shim。环境退出开关：`OPENCODEX_CODEX_SHIM_AUTO_RESTORE=0`。 |
 | `syncResumeHistory?` | `boolean` | `true` | 可逆的 Codex App 历史兼容性。原始元数据会被备份，并由 `ocx stop` / `ocx restore` 恢复。 |
@@ -33,6 +35,10 @@ description: 监听、远程访问、准入密钥、超时、存储、侧车、�
 如果较旧的开发版本在尚未提供备份支持之前修改过了 resume-history 元数据，请运行
 `ocx recover-history --legacy-openai --yes` 强制使用原生提供方恢复。
 此命令会重标所有包含用户消息的 `opencodex` 行，其中包括正常的专用提供方历史记录；执行前请查看生命周期参考中的完整范围警告。
+
+### 原生 Chat 的超时与完成状态
+
+原生 Chat 等待上游输出时也使用 `stallTimeoutSec`。非空文本、推理、拒绝内容、工具更新和完成事件会重置等待额度；保活注释、仅角色事件和单独的用量信息不会。等待慢客户端读取期间暂停计时。超时产生 `upstream_stall_timeout`：流式请求收到错误事件，非流式请求返回 HTTP 502。在终态结果到达前取消请求会返回取消错误，而不会把部分答案当作成功。非流式 Chat 支持 LF、CRLF 及多行 data 的 SSE 格式。
 
 ## 远程访问
 
@@ -167,7 +173,7 @@ routed 重放会把主 ChatGPT 认证注入内部请求。Anthropic 后端使用
 | --- | --- | --- | --- |
 | `enabled?` | `boolean` | 在可用时启用 | 图像描述总开关。 |
 | `backend?` | `"openai" \| "anthropic"` | auto | 显式值优先；未设置时优先使用可用的已保存 Anthropic OAuth 凭据，否则使用 `openai`。 |
-| `model?` | `string` | 依后端而定 | OpenAI 使用 `gpt-5.4-mini`，Anthropic 使用 `claude-sonnet-5`。 |
+| `model?` | `string` | 依后端而定 | OpenAI 使用 `gpt-5.6-luna`，Anthropic 使用 `claude-sonnet-5`。 |
 | `reasoning?` | `"low" \| "medium" \| "high" \| "xhigh" \| "max"` | `"low"` | OpenAI Responses 推理强度；Anthropic 会忽略该项。 |
 | `maxDescriptionsPerTurn?` | `number` | `8` | 每个主轮次允许的新增描述缓存未命中次数。`0` 会禁用调用；无效值会使用默认值。 |
 | `timeoutMs?` | `number` | `45000` | 侧车获取超时。整数 1–2147483647。 |
@@ -185,3 +191,5 @@ Anthropic OAuth 侧车会复用 opencodex 现有的 Claude Code OAuth 指纹。�
 ## Codex 额度网络诊断
 
 主 Codex 账户行中的 `quotaRefresh` 描述额度查询结果，并不代表剩余额度或模型访问权限。读取缓存或未执行查询时，该字段可能省略。查询使用正在运行的代理服务的环境，而不是当前终端的环境。未设置 `proxy` 时保留现有环境；`"auto"` 只在启动时读取 Windows 静态代理设置，不自动处理 PAC/WPAD、仅 SOCKS 的设置或运行中的更改。TUN 测试成功并不能单独证明 HTTP 代理路径正常。命令和状态说明见[英文网络诊断章节](/reference/configuration/server/#codex-quota-network-diagnostics)。
+
+`dropCodexSafetyBuffering`: 不会改变供应商安全策略或拒绝响应。原生 WebSocket `codex.response.metadata.headers` 和 `/responses/compact` 不在过滤范围内。

@@ -64,10 +64,14 @@ Authorization: Bearer <admin-token>
 | `GET /api/grok` | Grok 管理対象設定のステータスと候補モデルを読む | 400 ステータス読み取り失敗 |
 | `PUT /api/grok/selection` |除外された Grok モデルを永続化します。 400 個の無効な選択またはサイズが大きすぎる選択 |
 | `POST /api/grok/apply` |管理された同期を通じて永続的な Grok 設定を適用する | 409 `grok_apply_busy`; 400/500 適用失敗 |
+| `GET /api/grok/reset-coupons?accountId=...` | アクティブまたは指定された xAI アカウントの残り Grok 請求リセット トークンと有効期限ウィンドウを読む | 400 アカウントがありません; 401 未認証; 502 上流 gRPC-Web エラー |
+| `POST /api/grok/reset-coupons/consume` | 対象となるリセット クーポンを換金します。本文は `{ accountId?, tokenId?, operationId? }`。任意の `operationId`（UUIDv4）により換金は冪等になります: 同じ ID を繰り返すと、二重換金せずに永続化された結果を再生します。 | 400 無効な JSON/UUID; 401 未認証; 409 `identity_mismatch`; 502 上流エラー; 503 台帳容量 |
 | `GET, PUT /api/claude-desktop` | Claude Desktop のルーティング/ネイティブ プロファイルを読み取るか永続化する | 400 無効または使用できない割り当て |
 | `POST /api/claude-desktop/apply` |保存したプロファイルを Claude Desktop の管理対象設定に書き込みます。 400/500 書き込み失敗 |
 | `GET /api/claude-desktop/status` |保存済みプロファイルと適用済みプロファイルおよびデスクトップの健全性を検査する | 400 ステータス読み取り失敗 |
 | `GET, PUT /api/claude-code` |クロード コードのゲートウェイ、認証モード、モデル マップ、コンテキスト、エージェント、サイドカー設定の読み取りまたは更新 | 400 無効なフィールドまたは図形 |
+
+ダッシュボードは **Providers > xAI Grok > Accounts** から両方のクーポン パスを操作します。サインイン済みの各アカウント行には残りのクーポン数を示すチケット バッジがあり、バッジは有効期限ウィンドウを一覧し、期限が最も近いクーポンを換金するダイアログを開きます。ダイアログはクライアントが発行した `operationId` を送り、再試行せずタイムアウト後に送信を止めます。ジャーナル記録がまだ開いている換金は再実行されてしまうためです。`ocx account grok-reset-coupons` はターミナル側の同等コマンドです。
 
 モデルロスターと暗号化されたワーカータスクの動作の背後にある概念については、「[サブエージェントサーフェス](/guides/sub-agent-surface/)」を参照してください。
 
@@ -77,6 +81,49 @@ Authorization: Bearer <admin-token>
 | --- | --- | --- |
 | `GET /api/client-integrations/journal?client=...` | ロールバック操作を一覧表示します。任意でクライアントを指定でき、各行にはサーバー計算の `deletable` が含まれます。 | 400 無効なクライアント |
 | `DELETE /api/client-integrations/journal?opId=...` | 古いロールバック操作を廃止し、可能ならスナップショットも削除します。成功時の `snapshotRemoved` が `false` の場合、保守処理で再試行されます。 | 400 `opId` なし、404 存在しないか廃止済み、409 そのクライアントの最新操作 |
+
+## 統合変更のプレビュー
+
+プレビューは変更を適用せずに内容だけを示します。スナップショットも所有権記録もジャーナルも
+ロックも復旧も、いっさい書き込みません。
+
+| メソッドとパス | 目的 | 主なエラー |
+| --- | --- | --- |
+| `POST /api/client-integrations/preview` | クライアント 1 つの `apply`、`overwrite`、`disable` を計画します。本文は `{ "clientId": "...", "operation": "..." }` | 400 不正なクライアントまたは操作、400 `invalid_aside_profile_path`、409 `integration_preview_unavailable` |
+| `POST /api/client-integrations/restore/preview` | 取り消しを計画します。本文は `{ "opId": "...", "confirmDrift": false }` | 404 該当操作なし、400 `invalid_aside_profile_path`、409 `integration_preview_unavailable` |
+| `POST /api/client-integrations/aside/profiles/{profileId}/preview` | Aside プロファイル 1 つの変更を計画します。`restore` には `opId` が必要です | 400 不正な本文またはプロファイル未指定、404 該当プロファイルまたは操作なし、409 `integration_preview_unavailable` |
+
+計画には `version`、`clientId`、`operation`、`state`、`foreignEdit`、`kind` と `path` の組からなる
+`changes`、不透明な `fingerprint`、`canApply`、`willChange` が含まれ、`refusalReason` と
+`profileId` は任意です。パスは管理対象スキーマのパスか、`$snapshot`、`$ownership`、`$journal`
+の固定表記で、実行時に決まる位置は `*` になります。設定値やファイルの場所、選ばれた項目の
+名前は返しません。
+
+`canApply` が真で `willChange` が偽なら、操作は成功しますが管理対象のクライアント文書は何も
+変わりません。すでに適用済みのものを適用した場合などです。
+
+Aside プロファイルの変更はこの場合でも一つだけ保存します。確認を送ると、クライアント文書に触れる
+前にそのプロファイルの同期設定が記録されるため、管理ブロックがすでにないプロファイルを無効にすると
+設定だけが保存され、文書とその履歴はそのまま残ります。
+
+`integration_preview_unavailable` は今使えるモデル一覧がないという意味です。プロキシを起動した
+直後もそうですし、設定やプロバイダーキャッシュが変わって以前の一覧を破棄した場合もそうです。
+`GET /api/client-integrations` を読むと、取得に成功し設定を特定できたときに用意されるので、
+通常はこれで解決しますが、必ず用意されるとはかぎりません。
+
+## プレビューした変更の確定
+
+変更要求の本文に `operation` と `planFingerprint` を一緒に送ります。両方送るか両方省くかの
+どちらかで、片方だけ、または要求と異なる操作を書いた場合は拒否します。Aside はプロファイル
+1 つにしか結び付けられません。1 つのフィンガープリントで複数ファイルの変更は説明できないから
+です。
+
+サーバーは書き込む前に計画し直し、確認した内容がもう当てはまらなければ新しい計画を添えて
+`409 integration_preview_stale` を返します。自動で再試行はしないので、新しい計画を見て判断し
+直してください。
+
+フィンガープリントは楽観的な確認であって権限ではありません。変更してよいかどうかは管理 API の
+認証と所有権の規則が決めます。
 
 削除時はジャーナルを書き換えず、トゥームストーンを追記します。現在の取り消し地点を
 残すため、各クライアントの最新操作はサーバー側で保護されます。
@@ -120,6 +167,7 @@ Authorization: Bearer <admin-token>
 | `GET /api/debug/injection-logs` |制限付きガイダンス挿入デバッグ エントリを読み取る | — |
 | `GET /api/claude/inbound-debug` | Claude インバウンドのデバッグ状態とエントリを読む | — |
 | `GET /api/usage` |範囲とクライアント サーフェスごとの使用状況を要約する |ストレージを読み取れない場合は、`error: "read_failed"` 概要を返します。
+| `GET /api/metrics` | 論理リクエスト、物理送信、復旧種別、所要時間、TTFT のプロセスローカル Prometheus テキストメトリクスを返します。ラベルはプロトコル、結果、復旧クラスの閉じた集合のみで、リクエストや認証情報の識別子は出力しません。 | 起動時に `metricsExport.enabled` が true でなければ 404。通常の管理認証が必要で、データプレーン認証情報ではアクセスできません。 |
 | `GET /api/storage` |バケットごとの Codex ストレージ使用量をスキャン |スキャン失敗時に `error: "scan_failed"` ペイロードを返します。
 | `POST /api/storage/cleanup/preview` |アーカイブされたセッションのクリーンアップをプレビューし、バインディング ダイジェストを返します。 400 `invalid_json` または `invalid_percent` |
 | `POST /api/storage/cleanup` |プレビューされたアーカイブ セットを隔離または完全に削除します。 400 無効な入力。 409 古い/ビジー/参照状態。 500 ファイルシステム/データベース障害 |
@@ -129,6 +177,8 @@ Authorization: Bearer <admin-token>
 | `GET, PUT /api/storage/cleanup-policy` |スケジュールされたクリーンアップ ポリシーとジョブの状態を読み取りまたは更新します。 400 無効なポリシー |
 | `POST /api/storage/cleanup-policy/run` |手動クリーンアップ ポリシーの実行を開始します。 409 `already_running`; 500`cleanup_failed` |
 | `GET /api/storage/cleanup-policy/test-stream` |テスト専用ポリシー ストリーム フック | 404 `not_found` 利用できない場合 |
+
+行が既存のパーサーのサイズ上限を超えた場合、`GET /api/usage` と `GET /api/keys` は読み取れる行の集計を維持し、応答全体に `usageIncomplete: true` と `usageIncompleteReason: "oversized_rows"` を追加します。この診断はキャッシュや増分追記後も維持され、結果が空または一致なしでも返されます。再構築時には再計算されます。プロバイダー、モデル、API キーの識別子は短縮しません。フラグがないことは全行が有効だった証明にはなりません。`historyTruncated`、`entriesTruncated`、トークン測定カバレッジとは別の情報です。
 
 `models`、`providers`、および `days[].models` の各行にも `cacheHitRate` が含まれます。これは、プロバイダーのプロンプト キャッシュから供給された入力トークンの割合で、`[0, 1]` の範囲に制限されます。プロバイダーがキャッシュ テレメトリを報告しなかった場合、または行に入力トークンがない場合は、`0` ではなく `null` になります。「キャッシュ データなし」と「実際のヒット率 0%」は異なる事実であり、それらを同じように描画するチャートは誤解を招くためです。
 
