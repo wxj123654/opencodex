@@ -20,6 +20,7 @@ import {
   sessionIdHeaderFromRequest,
   reasoningReplayConversationIdFromResponsesRequest,
 } from "../request-log-conversation";
+import { resolveContextPrincipal } from "../auth-cors";
 import {
   isShadowSourceModel,
   shadowSourceModelPrefix,
@@ -52,7 +53,7 @@ import { parseRequest } from "../../responses/parser";
 import { anthropicSessionKeyFromParts } from "../../oauth/anthropic-routing";
 import { isTranslatorBudgetExceededError } from "../../lib/translator-budget";
 import { bindTurnTerminationScope, rememberDeliveredFinalAnswer } from "../../responses/turn-termination";
-import { requestLogSpeedLabel, readConfiguredCodexServiceTier } from "../request-log";
+import { observeCacheDiagnosticInbound, rebindCacheDiagnosticBody, requestLogSpeedLabel, readConfiguredCodexServiceTier } from "../request-log";
 import type { RouteResult } from "../../router";
 import {
   captureRouteStaticPolicy,
@@ -110,6 +111,13 @@ import {
   CODEX_RESERVE_OPT_IN_REQUIRED_MESSAGE,
 } from "../../codex/loopback-target";
 import { checkComboTargetInputAdmission, checkInputAdmission } from "./input-admission";
+import {
+  admissionModelDeniedResponse,
+  AdmissionModelDeniedError,
+  assertRouteAllowedByScope,
+  resolveAdmissionModelScope,
+  routeAllowedByScope,
+} from "../admission-model-scope";
 import { nativeContextLimits } from "../../codex/catalog";
 import { streamingContextOverflowResponse } from "./context-overflow";
 import {
@@ -150,6 +158,14 @@ export async function prepareResponsesRequest(
     }
     return decodeRequestErrorResponse(err, "responses");
   }
+  observeCacheDiagnosticInbound(
+    logCtx,
+    body,
+    req.headers,
+    options.promptCacheKeyIsSharedCohort === true
+      ? "system-derived"
+      : options.promptCacheKeyIsSharedCohort === false ? "metadata-derived" : "caller",
+  );
   if (!options.comboAttempt && !options.compactionRoutingOverride && inboundWire === "responses") {
     options.compactionRoutingOverride = applyCompactionRoutingOverride(body, req.headers, config, {
       endpoint: "responses",
@@ -293,6 +309,10 @@ export async function prepareResponsesRequest(
   try {
     parsed = parseRequest(body);
     parsed._promptCacheKeyIsSharedCohort = options.promptCacheKeyIsSharedCohort;
+    // The body may have been rebuilt since the inbound observation (previous-response
+    // expansion); alias the parsed raw body to the same draft so the outbound
+    // observation at the adapter seam still finds it.
+    rebindCacheDiagnosticBody(parsed._rawBody, logCtx.cacheDiagnosticDraft);
     // Captured before any parser mutates it, so both grammars see the client's id.
     const { fastRow, effortRow } = parseSyntheticRowId(parsed.modelId, config);
     if (fastRow) {
@@ -388,6 +408,17 @@ export async function prepareResponsesRequest(
       parsed._reasoningReplayScope = { clientThreadId: reasoningReplayConversationId };
     }
   }
+  if (parsed._reasoningReplayScope) {
+    // Scope replay cells to the caller principal. On loopback, admission carries no identity,
+    // so resolve it from an opencodex API key the caller volunteered (same rule as context
+    // history ownership). A caller that presents none has no principal, and none is invented:
+    // every keyless local process would otherwise share one bucket, and a client-visible cell id
+    // would become enough to read another caller's retained search result. Without a principal
+    // bridgeSearchReplayScope yields no scope, so nothing is recorded or restored for it. The
+    // field is always rewritten so an absent principal also clears one a reused holder carried.
+    const clientPrincipalId = resolveContextPrincipal(req, config, options.admission);
+    parsed._reasoningReplayScope = { ...parsed._reasoningReplayScope, clientPrincipalId };
+  }
   // Prefer a pre-populated id (routed Claude) over Responses headers that may be
   // absent or synthetically injected (session_id from prompt_cache_key).
   if (!logCtx.conversationId) {
@@ -411,7 +442,18 @@ export async function prepareResponsesRequest(
 
   let route: RouteResult;
   let credentialDomainWasRewritten = false;
+  // The selector the caller actually sent, captured before shadow interception
+  // or a subagent fallback rewrites it, so a refusal names the client's own
+  // request rather than a destination it never asked for.
+  const inboundSelector = parsed.modelId;
+  const admissionScope = resolveAdmissionModelScope(config, options.admission);
   const captureInboundRoutePolicy = (candidate: RouteResult): RouteResult => {
+    // Every route this request path produces passes through here: the direct
+    // name, an alias, a policy or combo selection, a compaction override, a
+    // shadow-intercept target and both subagent-fallback re-routes. Checking
+    // the key's scope at this one point is what stops a rewrite from reaching
+    // a destination the front door would have refused.
+    assertRouteAllowedByScope(admissionScope, inboundSelector, candidate);
     candidate.staticPolicy = captureRouteStaticPolicy(
       candidate.providerName,
       candidate.modelId,
@@ -474,6 +516,7 @@ export async function prepareResponsesRequest(
     }
     logCtx.routeDecision = route.routeDecision;
   } catch (err) {
+    if (err instanceof AdmissionModelDeniedError) return admissionModelDeniedResponse(err);
     if (err instanceof NoAvailableComboTargetsError) {
       return comboUnavailable(err.comboId);
     }
@@ -673,6 +716,7 @@ export async function prepareResponsesRequest(
         credentialDomainWasRewritten = true;
         logCtx.routeDecision = route.routeDecision;
       } catch (err) {
+        if (err instanceof AdmissionModelDeniedError) return admissionModelDeniedResponse(err);
         if (err instanceof NoAvailableComboTargetsError) {
           return comboUnavailable(err.comboId);
         }
@@ -873,6 +917,7 @@ export async function prepareResponsesRequest(
               credentialDomainWasRewritten = true;
               logCtx.routeDecision = route.routeDecision;
             } catch (err) {
+              if (err instanceof AdmissionModelDeniedError) return admissionModelDeniedResponse(err);
               if (err instanceof NoAvailableComboTargetsError) {
                 return comboUnavailable(err.comboId);
               }
@@ -1021,6 +1066,14 @@ export async function prepareResponsesRequest(
     inboundTransport: options.inboundTransport,
     claudeGoAffinity: options.claudeGoAffinity,
   });
+  // Normalization is the last thing that can move the destination: resolving an
+  // OpenAI virtual model rewrites route.modelId to the wire id that will
+  // actually be billed. A scope checked only before this would authorize the
+  // public selector and send the wire model, so the settled route is checked
+  // once more here.
+  if (!routeAllowedByScope(admissionScope, route)) {
+    return admissionModelDeniedResponse(new AdmissionModelDeniedError(inboundSelector, route));
+  }
   // Attribute local auth/cooldown failures to the public selector too; exact auth may fail before
   // the normal post-resolution provider label is assigned.
   if (route.codexAccountNamespace) {

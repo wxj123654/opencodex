@@ -50,7 +50,7 @@ const EXPECTED_KEY_PROVIDER_IDS = [
   "alibaba-token-plan-intl", "parallel", "zenmux", "litellm", "ollama-cloud", "mistral", "minimax", "minimax-cn",
   "kimi-code", "opencode-zen", "vercel-ai-gateway", "opper", "opencode-free", "xiaomi", "xiaomi-mimo", "kilo",
   "mimo-free", "mimo", "cloudflare-ai-gateway", "cloudflare-workers-ai", "gitlab-duo", "qoder", "qoder-cn",
-  "codebuddy", "codebuddy-cn", "electronhub-coding-plan",
+  "codebuddy", "codebuddy-cn", "electronhub-coding-plan", "stepfun",
 ];
 
 describe("provider registry parity", () => {
@@ -314,7 +314,7 @@ describe("provider registry parity", () => {
     expect(KEY_LOGIN_PROVIDERS.umans.modelContextWindows?.["umans-glm-5.2"]).toBe(405_504);
     expect(KEY_LOGIN_PROVIDERS.umans.modelInputModalities?.["umans-coder"]).toEqual(["text", "image"]);
     expect(KEY_LOGIN_PROVIDERS.umans.modelInputModalities?.["umans-glm-5.2"]).toEqual(["text"]);
-    expect(KEY_LOGIN_PROVIDERS["openai-apikey"].models).toEqual(["gpt-5.5", "gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol-pro", "gpt-5.6-terra-pro", "gpt-5.6-luna-pro", "daybreak-red-latest", "daybreak-blue-latest", "gpt-6-astra"]);
+    expect(KEY_LOGIN_PROVIDERS["openai-apikey"].models).toEqual(["gpt-5.5", "gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol-pro", "gpt-5.6-terra-pro", "gpt-5.6-luna-pro", "daybreak-red-latest", "daybreak-blue-latest", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"]);
     expect(KEY_LOGIN_PROVIDERS["openai-apikey"].modelContextWindows?.["gpt-6-astra"]).toBe(1_050_000);
     expect(KEY_LOGIN_PROVIDERS["openai-apikey"].modelMaxInputTokens?.["gpt-6-astra"]).toBe(922_000);
     expect(KEY_LOGIN_PROVIDERS["openai-apikey"].modelMaxOutputTokens?.["gpt-6-astra"]).toBe(128_000);
@@ -326,7 +326,7 @@ describe("provider registry parity", () => {
     expect(KEY_LOGIN_PROVIDERS["openai-apikey"].modelInputModalities?.["gpt-5.5"]).toEqual(["text", "image"]);
     expect((KEY_LOGIN_PROVIDERS["openai-apikey"] as unknown as { virtualModels?: unknown }).virtualModels).toBeUndefined();
     const apiRegistry = PROVIDER_REGISTRY.find(entry => entry.id === "openai-apikey")!;
-    expect(apiRegistry.models).toHaveLength(11);
+    expect(apiRegistry.models).toEqual(KEY_LOGIN_PROVIDERS["openai-apikey"].models);
     expect(Object.keys(apiRegistry.virtualModels ?? {}).sort()).toEqual([
       "gpt-5.6-luna-pro", "gpt-5.6-sol-pro", "gpt-5.6-terra-pro",
     ]);
@@ -973,15 +973,12 @@ describe("provider registry parity", () => {
   });
 
   test("Kimi coding aliases preserve model context and capability parity", () => {
-    const codingModels = [
-      "k3",
-      "k3[1m]",
-      "kimi-k2.7-code",
-      "kimi-k2.7-code-highspeed",
-      "kimi-k2.6",
-      "kimi-k2.5",
-      "kimi-for-coding",
-    ];
+    // 260921: the picker AND every preset metadata list seed only ids the subscription
+    // endpoint still serves (live /coding/v1/models: kimi-for-coding[-highspeed], k3,
+    // k3-256k). Seeding a retired id in a metadata list would re-arm the model-rename
+    // migration on every boot (#5066); saved rows still naming one are repaired by
+    // MODEL_RENAMES instead.
+    const codingModels = ["k3", "k3[1m]", "kimi-for-coding"];
     const parityLists = [
       "noReasoningModels",
       "noTemperatureModels",
@@ -994,13 +991,25 @@ describe("provider registry parity", () => {
     for (const providerId of ["kimi", "kimi-code"]) {
       const entry = PROVIDER_REGISTRY.find(provider => provider.id === providerId);
       expect(entry?.models).toEqual(codingModels);
+      // The whole point of the refresh: both presets default to the live alias. A
+      // registry rollback to the retired default would silently pass without this.
+      expect(entry?.defaultModel).toBe("kimi-for-coding");
+      expect(entry?.models).not.toContain("kimi-k2.7-code");
       for (const modelId of codingModels) {
-        expect(entry?.modelContextWindows?.[modelId]).toBe(modelId === "k3[1m]" ? 1_048_576 : 262_144);
+        // 260921: kimi-for-coding (K2.8 Preview) shares the verified 1M ceiling with k3[1m];
+        // all other ids stay at the 256K standard window.
+        expect(entry?.modelContextWindows?.[modelId]).toBe(modelId === "k3[1m]" || modelId === "kimi-for-coding" ? 1_048_576 : 262_144);
       }
       for (const field of parityLists) {
-        expect(entry?.[field]).toContain("kimi-k2.7-code");
-        expect(entry?.[field]).toContain("kimi-for-coding");
+        // Every preset list is live-id only: kimi-for-coding must be there, the retired
+        // k2.x ids must not (a stale k2.7 row would leak the dead id back into the picker).
+        if (field !== "noReasoningModels") expect(entry?.[field]).toContain("kimi-for-coding");
+        expect(entry?.[field] ?? []).not.toContain("kimi-k2.7-code");
       }
+      // kimi-for-coding left noReasoningModels when K2.8 added the adjustable ladder.
+      expect(entry?.noReasoningModels ?? []).not.toContain("kimi-for-coding");
+      expect(entry?.modelReasoningEfforts?.["kimi-for-coding"]).toEqual(["low", "high", "max"]);
+      expect(entry?.modelDefaultReasoningEfforts?.["kimi-for-coding"]).toBe("max");
       expect(entry?.modelSuffixBracketStrip).toBe(true);
       expect(entry?.promptCacheKey).toBe(true);
       // Key-pool 429 rotation rebuilds the provider from the persisted config (not the routed
@@ -1032,7 +1041,8 @@ describe("provider registry parity", () => {
       expect(entry?.noPenaltyModels).toContain("k3");
       expect(entry?.preserveReasoningContentModels).toContain("k3");
       expect(entry?.preserveReasoningContentModels).toContain("k3[1m]");
-      expect(entry?.modelReasoningEfforts?.["kimi-for-coding"]).toEqual([]);
+      // 260921: K2.8 gave kimi-for-coding the same adjustable low/high/max ladder as k3.
+      expect(entry?.modelReasoningEfforts?.["kimi-for-coding"]).toEqual(["low", "high", "max"]);
     }
 
     const kimi = PROVIDER_REGISTRY.find(provider => provider.id === "kimi")!;

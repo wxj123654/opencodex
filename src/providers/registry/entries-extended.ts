@@ -74,10 +74,10 @@ import {
   VOLCENGINE_PLAN_TEXT_ONLY_MODELS,
   ALIBABA_INTL_TOKEN_PLAN_INPUT_MODALITIES,
   KIMI_API_MODELS,
-  KIMI_CODING_MODELS,
   KIMI_THINKING_MODELS,
   KIMI_CODING_NO_REASONING_MODELS,
   KIMI_API_NO_REASONING_MODELS,
+  KIMI_CODING_LIVE_MODELS,
   KIMI_CODING_REASONING_EFFORTS,
   KIMI_CODING_DEFAULT_REASONING_EFFORTS,
   KIMI_CODING_REASONING_EFFORT_MAPS,
@@ -104,6 +104,11 @@ import {
   OPPER_MODEL_CONTEXT_WINDOWS,
   OPPER_MODEL_MAX_OUTPUT_TOKENS,
   OPPER_MODEL_INPUT_MODALITIES,
+  STEPFUN_MODELS,
+  STEPFUN_MODEL_CONTEXT_WINDOWS,
+  STEPFUN_MODEL_INPUT_MODALITIES,
+  STEPFUN_NO_VISION_MODELS,
+  STEPFUN_REASONING_EFFORTS,
 } from "./model-seeds";
 
 /**
@@ -612,6 +617,9 @@ export const PROVIDER_REGISTRY_EXTENDED: readonly ProviderRegistryEntry[] = [
     // The address this row occupied before the move. A saved custom provider still pointing
     // at the Chat endpoint keeps receiving this row's metadata (#1100).
     destinationAliases: [{ baseUrl: "https://api.z.ai/api/coding/paas/v4", adapter: "openai-chat" }],
+    // The GLM Chat surface rejects `developer` (HTTP 400 code 1214); record the fold so the
+    // native passthrough and the alias destination both normalize instead of failing upstream.
+    foldDeveloperRoleToSystem: true,
     dashboardUrl: "https://z.ai/manage-apikey/apikey-list", defaultModel: "glm-5.3",
     note: "GLM-5.3 coding subscription",
     models: ["glm-5.3", "glm-5.3[1m]", "glm-5.3-flash", "glm-5.2", "glm-5.2[1m]", "glm-5.1", "glm-5", "glm-4.6"],
@@ -650,6 +658,8 @@ export const PROVIDER_REGISTRY_EXTENDED: readonly ProviderRegistryEntry[] = [
     baseUrl: "https://open.bigmodel.cn/api/paas/v4",
     adapter: "openai-chat",
     authKind: "key",
+    // Same GLM Chat surface as `zai`: `developer` is rejected with HTTP 400 code 1214.
+    foldDeveloperRoleToSystem: true,
     dashboardUrl: "https://bigmodel.cn/console/usercenter/apikeys",
     defaultModel: "glm-4.6",
     models: ZHIPU_BIGMODEL_MODELS,
@@ -703,6 +713,8 @@ export const PROVIDER_REGISTRY_EXTENDED: readonly ProviderRegistryEntry[] = [
     baseUrl: "https://open.bigmodel.cn/api/coding/paas/v4",
     adapter: "openai-chat",
     authKind: "key",
+    // Same GLM Chat surface as `zai`: `developer` is rejected with HTTP 400 code 1214.
+    foldDeveloperRoleToSystem: true,
     dashboardUrl: "https://bigmodel.cn/console/usercenter/apikeys",
     defaultModel: "glm-5.3",
     models: ["glm-5.3", "glm-5.3[1m]", "glm-5.3-flash", "glm-5.2", "glm-5.2[1m]", "glm-5.1", "glm-5", "glm-4.6"],
@@ -1121,13 +1133,17 @@ export const PROVIDER_REGISTRY_EXTENDED: readonly ProviderRegistryEntry[] = [
   },
   {
     id: "kimi-code", label: "Kimi (coding)", baseUrl: "https://api.kimi.com/coding/v1", adapter: "openai-chat", authKind: "key",
-    dashboardUrl: "https://platform.moonshot.cn/console/api-keys", defaultModel: "kimi-k2.7-code",
+    // 260921: kimi-k2.7-code was retired from the coding endpoint; the kimi-for-coding alias
+    // is the stable ID and currently routes to K2.8 Preview (same as the OAuth preset).
+    dashboardUrl: "https://platform.moonshot.cn/console/api-keys", defaultModel: "kimi-for-coding",
     modelSuffixBracketStrip: true,
     // API-key form of the same Kimi Code Plan transport; keep cache affinity identical to OAuth.
     promptCacheKey: true,
     // Keep Responses tool-result adjacency aligned with the OAuth preset (#4726).
     requiresAdjacentResponsesToolResults: true,
-    models: KIMI_CODING_MODELS,
+    // 260921: same live-id picker as the OAuth preset — the retired k2.x ids are repaired
+    // in saved configs by MODEL_RENAMES, not offered on fresh installs.
+    models: KIMI_CODING_LIVE_MODELS,
     modelContextWindows: KIMI_CODING_MODEL_CONTEXT_WINDOWS,
     modelInputModalities: KIMI_CODING_MODEL_INPUT_MODALITIES,
     noReasoningModels: KIMI_CODING_NO_REASONING_MODELS,
@@ -1353,7 +1369,7 @@ export const PROVIDER_REGISTRY_EXTENDED: readonly ProviderRegistryEntry[] = [
     featured: false,
     dashboardUrl: "https://github.com/settings/copilot",
     liveModels: true,
-    models: ["gpt-4o", "gpt-4.1", "gpt-4.1-mini", "claude-sonnet-4", "gemini-2.5-pro", "gpt-5-mini", "gpt-5.3-codex", "gpt-5.4", "gpt-5.4-mini", "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"],
+    models: ["gpt-4o", "gpt-4.1", "gpt-4.1-mini", "claude-sonnet-4", "gemini-2.5-pro", "gpt-5-mini", "gpt-5.3-codex", "gpt-5.4", "gpt-5.4-mini", "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-6-sol", "gpt-6-luna"],
     defaultModel: "gpt-4o",
     // Copilot fronts a mixed-wire catalog: these models reject /chat/completions for
     // real Codex-agent traffic (function tools + reasoning), so every inbound wire
@@ -1370,6 +1386,9 @@ export const PROVIDER_REGISTRY_EXTENDED: readonly ProviderRegistryEntry[] = [
       "gpt-5.6-sol": "openai-responses",
       "gpt-5.6-terra": "openai-responses",
       "gpt-6-astra": "openai-responses",
+      // 260923 preemptive: GPT-6 Sol/Luna ride Responses like every GPT-5.6/6 row above.
+      "gpt-6-sol": "openai-responses",
+      "gpt-6-luna": "openai-responses",
       "grok-4.5": "openai-responses",
       "grok-4.6": "openai-responses",
       "mai-code-1.1-flash": "openai-responses",
@@ -1506,5 +1525,21 @@ export const PROVIDER_REGISTRY_EXTENDED: readonly ProviderRegistryEntry[] = [
     preserveCustomDestination: true,
     note: "Electron Hub Coding Plan (DevPass). Requires an ek-dev- key and :dev model ids only; token usage is unlimited with soft full-speed headroom and parallel-slot fair use. Do not use a master ek- key here — that bills credits against the full catalog.",
   },
+  {
+    id: "stepfun",
+    label: "StepFun",
+    baseUrl: "https://api.stepfun.com/v1",
+    adapter: "openai-chat",
+    authKind: "key",
+    dashboardUrl: "https://platform.stepfun.com",
+    defaultModel: "step-5-preview",
+    models: STEPFUN_MODELS,
+    liveModels: true,
+    preserveCustomDestination: true,
+    modelContextWindows: STEPFUN_MODEL_CONTEXT_WINDOWS,
+    modelInputModalities: STEPFUN_MODEL_INPUT_MODALITIES,
+    noVisionModels: STEPFUN_NO_VISION_MODELS,
+    reasoningEfforts: STEPFUN_REASONING_EFFORTS,
+    note: "StepFun (阶跃星辰) official OpenAI-compatible API.",
+  },
 ];
-

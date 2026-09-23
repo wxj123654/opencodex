@@ -110,7 +110,7 @@ export {
   sanitizeModelCostsForDisplay,
   modelPreferHostedToolsConfigError,
 } from "./config/schema/leaf-validators";
-export { hardenExistingSecret, retryOn429PolicyConfigError } from "./config/load-degrade";
+export { hardenExistingSecret, retryOn429PolicyConfigError, retryOnResetPolicyConfigError } from "./config/load-degrade";
 export { backupInvalidConfig } from "./config/salvage";
 export type { ConfigDiagnostics, ConfigAdmissionSnapshot } from "./config/diagnostics";
 export {
@@ -133,8 +133,8 @@ export {
   withExpectedConfigGenerationSync,
 } from "./config/mutation-lock";
 export {
-  armClaudeCodeBaseline,
-  adoptPersistedProviderIntoLiveConfig,
+  armClaudeCodeBaseline, armDetachedConfigBaseline,
+  adoptPersistedClaudeCode, adoptPersistedProviderIntoLiveConfig,
   claudeCodeBaselineArmed,
   reconcileLiveConfigFromDisk,
   saveConfigPreservingClaudeCode,

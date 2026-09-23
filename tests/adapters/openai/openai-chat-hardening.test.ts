@@ -163,7 +163,9 @@ describe("passthrough developer-role normalization", () => {
   // Zhipu GLM coding endpoint answers 400 code 1214 "Incorrect role information" for any
   // `developer` message; a chat client pointed at the proxy (not at the upstream host)
   // cannot know the upstream is strict, so the proxy must normalize. Regression for the
-  // pi-coding-agent → opencodex → zai/glm-5.3-flash 400 report (260831).
+  // pi-coding-agent → opencodex → zai/glm-5.3-flash 400 report (260831). Upstream #5213
+  // replaced the hostname test with the recorded `foldDeveloperRoleToSystem` flag; the GLM
+  // registry entries carry it, so a routed provider arrives here already flagged.
   const rawBody = {
     messages: [
       { role: "developer", content: "You are a coding agent." },
@@ -173,7 +175,7 @@ describe("passthrough developer-role normalization", () => {
 
   test("rewrites developer messages to system on strict OpenAI-compatible backends", () => {
     const request = buildOpenAIChatPassthroughRequest(
-      provider({ baseUrl: "https://api.z.ai/api/coding/paas/v4" }),
+      provider({ baseUrl: "https://api.z.ai/api/coding/paas/v4", foldDeveloperRoleToSystem: true }),
       rawBody,
       "glm-5.3-flash",
       false,
@@ -196,7 +198,7 @@ describe("passthrough developer-role normalization", () => {
 
   test("leaves developer messages untouched when the caller body has none", () => {
     const request = buildOpenAIChatPassthroughRequest(
-      provider({ baseUrl: "https://api.z.ai/api/coding/paas/v4" }),
+      provider({ baseUrl: "https://api.z.ai/api/coding/paas/v4", foldDeveloperRoleToSystem: true }),
       { messages: [{ role: "user", content: "Say OK" }] },
       "glm-5.3-flash",
       false,

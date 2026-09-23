@@ -320,6 +320,12 @@ export interface ProviderRegistryEntry {
   /** Opt this provider into forwarding prompt_cache_key (OpenAI-specific; strict backends reject it). */
   promptCacheKey?: boolean;
   /**
+   * Recorded fact about this destination: its Chat surface rejects the `developer` role, so
+   * the native passthrough folds it to `system` (see OcxProviderConfig.foldDeveloperRoleToSystem).
+   * Registry-owned like `promptCacheKey`: the preset itself is the record.
+   */
+  foldDeveloperRoleToSystem?: boolean;
+  /**
    * Opt-in: forward `service_tier` on the `/chat/completions` wire. Same hazard as
    * `promptCacheKey` — an OpenAI-specific extension that strict gateways reject. Distinct from
    * `supportsServiceTier`, which governs the Responses wire.

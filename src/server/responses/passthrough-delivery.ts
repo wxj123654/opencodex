@@ -93,6 +93,7 @@ import { createResponsesFieldBackfillBlockRewrite } from "./responses-field-back
 import { createResponsesFunctionToolRepairBlockRewrite } from "../responses-function-tool-repair";
 import {
   createUndeclaredToolCallGuardBlockRewrite,
+  currentTurnWireToolCatalogBody,
   undeclaredToolCallNameInResponse,
   undeclaredToolCallMessage,
   normalizeDefaultNamespaceInJson,
@@ -416,10 +417,9 @@ export async function deliverPassthroughResponse(
             describeImages: requiresVisionPreprocessing(config, route.provider, route.modelId, route.providerName),
             sidecar: config.webSearchSidecar,
           }),
-          // Scope the executed-search memo to this exact upstream (#4587). The Responses adapter
-          // derives the same scope from the same base URL before the NEXT turn is dispatched, so
-          // a replayed hosted cell can be turned back into the destination's own call and result.
-          destinationScope: bridgeSearchReplayScope(route.provider.baseUrl),
+          // Snapshot the bound conversation, provider, model, destination, and credential. The
+          // next turn must match every dimension before its hosted cell can recover this result.
+          destinationScope: bridgeSearchReplayScope(parsed._reasoningReplayScope),
           // Appending a search result can push the continuation past the ceiling the first leg
           // was admitted under, so the same limit is re-applied before every later send.
           checkOutboundBody: (continuationBody: string) => {
@@ -515,7 +515,19 @@ export async function deliverPassthroughResponse(
           ? createGrokResponsesTimestampBlockRewrite()
           : undefined,
         grokClientCompatibilityEnabled
-          ? createGrokResponsesSparseTerminalBlockRewrite(translatorBudget)
+          ? createGrokResponsesSparseTerminalBlockRewrite(
+            translatorBudget,
+            nativeExchange.outboundRequestBody,
+            {
+              clientToolAuthorizationBody: currentTurnWireToolCatalogBody(
+                parsed._rawBody,
+                parsed._replayPrefixLen ?? 0,
+              ),
+              routedNamespaceToolAliases: responseEffects.routedNamespaceToolAliases,
+              routedMuseToolNameAliases: responseEffects.routedMuseToolNameAliases,
+              convertedRoutedCustomToolNames: routedCustomToolNames,
+            },
+          )
           : undefined,
         snapshotRepairEnabled
           ? createResponsesSnapshotBlockRewrite(nativeExchange.outboundRequestBody, translatorBudget)

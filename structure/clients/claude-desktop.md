@@ -29,6 +29,61 @@ Native OpenAI pool routing also accepts
 [Orca-linked accounts](../codex-home.md#orca-source-owned-account-import), whose source resolution
 belongs to the shared account store. The import CLI adds pool rows independently of Desktop profiles.
 
+## Desktop modes: first-party and gateway
+
+`src/claude/desktop-first-party.ts` owns the Desktop mode contract. Two modes exist and are
+mutually exclusive on one machine:
+
+- **first-party** (default): Claude Desktop itself is left on claude.ai — login, Chat tab,
+  connectors and remote control are untouched and no config-library profile is written. The apply
+  writes only `HTTPS_PROXY=http://127.0.0.1:<port+100>` and `NODE_EXTRA_CA_CERTS=<config>/claude-intercept/ca.pem`
+  into the `env` block of Claude Code's `settings.json` (via `src/claude/intercept/settings.ts`),
+  creating the local authority first. Only the Claude Code process Desktop spawns for the Code tab
+  (and its subagents, and any standalone `claude` CLI) reads that env, so only their
+  `api.anthropic.com` traffic reaches the [Claude intercept pair](../runtime.md#claude-intercept-pair).
+- **gateway**: the existing third-party profile written by `src/claude/desktop-3p.ts`; the whole
+  app switches to the local gateway. It is selected explicitly (`--gateway`, dashboard, or the
+  legacy `--static|--hybrid|--discovery-only` shape flags, which imply it).
+
+`resolveClaudeDesktopMode` returns the explicit `claudeCode.desktopMode` when set; otherwise a
+persisted `desktopProfile.appliedFingerprint` (an existing gateway install) keeps `gateway`, and a
+fresh install resolves to `first-party`. Updates therefore never flip a working gateway install
+silently, while new installs land on first-party. `resolveClaudeDesktopApplyMode` narrows an
+*implied* first-party to gateway where the intercept pair cannot run (client role or
+`claudeCode.intercept.enabled: false`); an explicit `first-party` is refused with
+`intercept_disabled` instead of being rewritten.
+
+Mode switches establish the replacement before removing the previous connection. A failed
+first-party apply (disabled intercept, CA failure, unreadable settings or foreign env) preserves
+the gateway; a failed gateway apply preserves the first-party env. After a successful first-party
+write, `removeDesktop3pStandardPivot({ replaceWhileEnabled: true })` retires the owned gateway.
+A refused pivot that has not changed Desktop rolls back only the managed env keys while they still match this apply;
+unrelated settings survive, and rollback failure is reported explicitly. If Desktop already pivoted to standard but credential cleanup is incomplete, first-party stays active and its mode is recorded. After a successful gateway
+write, only env values anchored on OpenCodex's CA path are removed. The committed gateway mode and profile fingerprint are persisted together before first-party
+cleanup via `src/claude/desktop-gateway-state.ts`. Cleanup failure remains a partial failure, while
+subsequent default applies and status retain the gateway choice. A separate persistence failure
+is reported explicitly; its mode/profile snapshot is not claimed to have been saved. These file operations are ordered,
+not a crash-atomic transaction across the settings file and Desktop library.
+Disabling the integration (native toggle, `ocx ensure` with the durable switch OFF) removes both the
+gateway profile and the first-party env. With the switch ON in first-party mode, `ocx ensure`
+re-applies a stale env (the proxy port follows the public port).
+
+Surfaces: `ocx claude desktop apply [--first-party|--gateway]` in `src/cli/claude-desktop.ts`;
+`POST /api/claude-desktop/apply` with `mode` ∈ `first-party|gateway|static|hybrid|discovery` and
+`GET /api/claude-desktop/status` (`mode`, `firstParty.{applied,stale,interceptEnabled,interceptRunning,proxyPort,caCertPath}`)
+in `src/server/management/agent-settings-routes.ts`; the native toggle in
+`src/server/management/native-integration-routes.ts` applies the resolved mode on enable. Managed
+Windows policy health only applies in gateway mode, because first-party never touches Desktop's own
+configuration. Ordinary Chat-tab traffic is out of scope for both modes.
+
+`src/claude/desktop-gateway-state.ts` adopts the exact committed Claude subtree and rebases the live hand-edit guard only after persistence succeeds. Pending disjoint live edits survive; later hand edits remain protected during unrelated whole-config saves. Gateway mode and fingerprint are recorded before cleanup and diagnostic awaits.
+
+Production apply and status routes use the asynchronous, read-only policy probe in
+`src/claude/desktop-policy.ts`. Concurrent requests share one in-flight probe, and its
+settled state is cached for 30 seconds. Each registry query is bounded to two seconds;
+timeouts and unreadable results report unknown policy state without blocking the server
+event loop. Injected probes may return a state or a promise, so isolated callers can exercise the same asynchronous boundary.
+
 ## Connected Claude Desktop profiles
 
 The connection's local Codex readiness check follows the [selected-runtime probe contract](../runtime.md#remote-hub-hardening-ownership); general status hands its resolved command to this check instead of probing the version twice.

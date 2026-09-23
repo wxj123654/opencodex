@@ -93,7 +93,7 @@ metadata, and Pro virtual ids rewrite to the base wire model with `reasoning.mod
 shipped v1 config, opencodex creates `config.json.pre-openai-tiers-v2.bak` without replacing a
 differing backup and rewrites known legacy namespaced selected ids to bare ids.
 
-### GPT-6 Astra
+### GPT-6 Astra, Sol, Luna and Astra Minor
 
 `gpt-6-astra` uses the Codex-login route; `openai-apikey/gpt-6-astra` uses your API key.
 Availability still depends on the upstream account. Native Astra keeps the shipped Codex defaults:
@@ -111,6 +111,27 @@ and API reasoning efforts through `max`. OpenCodex's routed synthetic Ultra cont
 existing wire-effort mapping; it is not an additional API effort. There is no Astra `-pro` alias.
 Use the existing `fastMode` setting, or Codex's `service_tier = "fast"` with
 `[features].fast_mode = true`; API `fast` and `priority` are accepted Fast spellings.
+
+[GPT-6 Sol and Luna](https://openai.com/index/introducing-gpt-6-sol-and-luna/) (announced
+September 22, 2026) are Codex-login natives: `gpt-6-sol` and `gpt-6-luna`, shown as **GPT-6-Sol**
+and **GPT-6-Luna**. Like Astra they are listed on every install and are not gated on an account
+roster; if your account cannot use them yet, the request still goes out and you see the upstream
+error. Their metadata comes from the Codex `/models` roster, which serves these two rows only to
+`client_version` **0.155.0 or later**; opencodex ships a copy of those rows, so they appear even
+when your installed Codex catalog predates them.
+
+| Model | Default context | Opt-in ceiling | Default effort | Reasoning ladder |
+| --- | ---: | ---: | --- | --- |
+| `gpt-6-sol` | 272,000 | 872,000 | `medium` | `low` through `ultra` |
+| `gpt-6-luna` | 272,000 | 872,000 | `medium` | `low` through `max` (no `ultra`) |
+
+The same `providerContextCaps.openai`, `modelContextWindows` and `modelAutoCompactTokenLimits`
+levers apply as for Astra. There are no `openai-apikey/` rows or built-in price estimates for Sol
+or Luna yet.
+
+`gpt-6-astra-minor` (**GPT-6-Astra-Minor**) is an unreleased Astra variant. It is account-gated:
+it stays hidden, and requests for it are refused locally, until an authenticated Codex roster for
+your account lists it. When it appears it uses Astra's context, ladder and modalities.
 
 Pricing checked September 5, 2026:
 
@@ -141,6 +162,8 @@ Providers can expose a built-in shorthand, such as `agy` for `google-antigravity
 | --- | --- | --- |
 | `adapter` | `string` | One of `openai-chat`, `openai-responses`, `anthropic`, `google`, `kiro`, `cursor`, `ollama-native`, `azure-openai` (or alias `azure`), `codebuddy`, `qoder`, `devin`, `devin-http`. |
 | `baseUrl` | `string` | Upstream API base URL. Most built-in fixed endpoints ignore a mismatch; collision-safe key presets preserve an older same-named custom destination. |
+| `proxy?` | `string \| null` | Per-provider egress route. Omit it to inherit the global proxy decision; use `"direct"` or `null` to force direct egress; or provide an absolute `http://`, `https://`, `socks5://`, or `socks5h://` proxy URL. An empty string is rejected. |
+| `noProxy?` | `string \| string[]` | Destinations this provider reaches directly, using `NO_PROXY` host-pattern syntax. A match bypasses both this provider's own proxy and an inherited global proxy. |
 | `requestPacing?` | `{ enabled, requestsPerMinute?, minIntervalMs?, models? }` | Optional client-side outbound request-start pacing, separate from upstream usage, billing, and rate-limit indicators. RPM is converted to an even interval; `minIntervalMs` may impose a longer interval. Provider limits apply across all models, while `models` entries use exact upstream model IDs (for example `nvidia/llama-3.1-nemotron-ultra-253b-v1`) and can only add delay. Queue waits do not consume the upstream response-header timeout. HTTP, Responses WebSocket, and explicit adapter `fetchResponse`/`runTurn` dispatches are covered. |
 | `upstreamHttpVersion?` | `"auto" \| "http1.1" \| "h1" \| "http2" \| "h2"` | Pin the HTTP version used for upstream requests to this provider. Defaults to `auto`, which lets Bun negotiate. An explicit pin requires an HTTPS target and fails locally when it cannot be honored. Set `http1.1` when a provider's HTTP/2 SSE stream stalls instead of delivering events — the symptom is a long-running streaming request that produces nothing and eventually times out. For Cursor, `http1.1`/`h1` selects its `RunSSE` + `BidiAppend` compatibility transport for inference and also pins live model discovery. Management `POST`/`PATCH` accept `null` to clear it back to `auto`. |
 | `responsesPath?` | `string` | Relative resource path for key-auth `openai-responses` requests. It must start with `/` and contain no scheme, query, or fragment. |
@@ -201,6 +224,7 @@ Providers can expose a built-in shorthand, such as `agy` for `google-antigravity
 | `noPenaltyModels?` | `string[]` | Models that reject presence/frequency penalties. |
 | `noStructuredOutputModels?` | `string[]` | Exact model IDs whose `openai-chat` endpoint rejects `response_format`. Only an exact requested-model match omits the field; structured-output translation stays enabled for every other `openai-chat` model. |
 | `noJsonSchemaModels?` | `string[]` | Exact model IDs whose `openai-chat` endpoint rejects a `json_schema` `response_format` but still accepts `json_object`. Such a request is downgraded to `json_object` instead of being dropped, so a caller asking for JSON still gets JSON. `noStructuredOutputModels` wins when a model is on both lists. The `opencode go`, `opencode zen`, and `opencode free` presets ship this for their DeepSeek routes. |
+| `foldDeveloperRoleToSystem?` | `boolean` | Whether an `openai-chat` destination accepts the `developer` role. `foldDeveloperRoleToSystem` unset sends `system`, `true` sends `system`, and `false` sends `developer`. Unset means nothing has been recorded about this destination; `true` records an upstream that rejects the role; `false` records one that accepts it. The message keeps its position in the conversation in every case — only the role changes. A destination that rejects the role answers `400 role 'developer' is not allowed` and the turn never starts, which is why the unrecorded state is the folded one. |
 | `omitReasoningEffortWithToolsModels?` | `string[]` | Exact `openai-chat` model IDs that accept a reasoning-effort field on an ordinary turn but reject it once function tools are present. The model keeps its advertised effort ladder; OpenCodex omits the wire field for tool-bearing requests only and the upstream default applies. Narrower than `noReasoningModels`, which strips reasoning from every request and costs the model its picker entirely. |
 | `parallelToolCalls?` | `boolean` | Toggle parallel tool calls. OpenAI Chat defaults on; non-chat adapters advertise only on explicit `true`. |
 | `terminalContinuationGuard?` | `boolean` | Opt in an `openai-chat` provider to one bounded internal re-ask when an actionable turn announces work, then cleanly stops without a tool call. Defaults to `false`; explicit `false` behaves like omission. Combo attempts and routed compaction turns are excluded, and non-`openai-chat` adapters ignore this option. |
@@ -209,6 +233,7 @@ Providers can expose a built-in shorthand, such as `agy` for `google-antigravity
 | `webSearchBridge?` | `{ enabled?: boolean; backend?: "ollama" \| "openai" \| "anthropic" \| "xai" \| "gemini" \| "exa"; maxSearches?: number; timeoutMs?: number; endpoint?: string }` | Key-auth `openai-responses` passthrough providers only. Off by default. Codex always declares the hosted `web_search` tool, and the passthrough relays it on the assumption the destination executes it. A gateway that does not run hosted search answers with a `function_call` named `web_search` that nothing runs, and the undeclared-tool guard ends the turn. With `enabled: true` and an explicit `backend` OpenCodex intercepts that call, runs the search itself, feeds the result back to the same upstream, and shows Codex a hosted `web_search_call` cell. Never armed for `authMode: "forward"` (ChatGPT already searches) or for a provider that executes hosted search upstream. `backend` is required; there is no implicit default and a missing credential for the named backend leaves the bridge disarmed rather than falling through to another paid search. `ollama` reuses this provider's own API key on `POST <origin>/api/web_search`, so the origin must be `https://ollama.com` unless the operator names `endpoint` explicitly. `openai` / `anthropic` / `xai` / `gemini` / `exa` reuse the matching sidecar executor and that executor's own credential (`webSearchSidecar.exaApiKey` for Exa). The search model comes from `webSearchSidecar.model` only when `webSearchSidecar.backend` resolves to the same backend this bridge names; otherwise the bridge runs that backend's own default, because a model chosen for one vendor is rejected by another. An unset `webSearchSidecar.backend` resolves to `openai`, so an unset-backend model reaches an `openai` bridge and no other. There is no per-provider bridge model override. Streaming turns only. A turn that mixes `web_search` with another client tool call still fails closed rather than dropping the client's call. Assistant text such as XML-like `<web_search>` prose is not executed. Defaults: `maxSearches: 3` (1..10), `timeoutMs: 60000` (1000..600000). |
 | `retryOn429?` | `{ enabled?: boolean; attempts?: number; intervalMs?: number; maxIntervalMs?: number; respectRetryAfter?: boolean }` | API-key providers only (`authMode: "key"`). Opt-in same-target 429 retry: when `retryOn429` is absent the feature is off; object presence enables it unless `enabled: false`. On 429 the proxy waits (upstream `Retry-After` or the fixed interval) and replays the identical request on the same key before any key failover — across the main text-turn recovery loop, the Responses passthrough wire, the image/video bridge, the web-search sidecar, and terminal continuations. Only pre-stream HTTP 429 responses are eligible for replay; custom `runTurn` transports are outside the HTTP retry loop. `attempts` counts same-key replays after the first 429 (total sends = `attempts` + 1) and is one request-wide budget shared by the main recovery loop, the terminal-guard continuation, and bridge retries. Exhausting `attempts` only stops further same-key replays: normal key failover or final-error handling then applies per the available targets — on the key-auth passthrough wire there is no failover, so the exhausted 429 surfaces as-is. Codex itself never retries 429, so this is the only defense for single-key providers. Defaults: `enabled: true`, `attempts: 3`, `intervalMs: 5000`, `maxIntervalMs: 60000` (any single wait is capped at `maxIntervalMs`, itself capped at 600000), `respectRetryAfter: true`. |
 | `transientRetryOn5xx?` | `{ enabled?: boolean; attempts?: number }` | Key-auth `openai-chat` and `openai-responses` providers only. `authMode: "forward"` providers (the ChatGPT account pool) never read this option and keep the default ladder. Opt-in retry for pre-stream transient upstream statuses (500, 502, 503, 504, 520, 521, 522): absent means off, object presence enables it unless `enabled: false`. Covers the initial Responses request, the Responses passthrough lane and each of its recovery legs (OAuth-401 replay, same-target 429 replay, validated rebuild), the terminal-guard continuation, and native `/v1/chat/completions`. `attempts` is the TOTAL number of upstream sends allowed for one request including the first (1..10, default 3) — it is one budget shared with connection-reset recovery, so `3` means at most three real requests reach the provider. On the Responses passthrough lane the configured value is additionally intersected with the request-wide send allowance, so a value below that allowance narrows the ladder exactly while a value above it does not raise the bound. Waits use a fixed 400 ms exponential backoff capped at 5 s and honor `Retry-After`. Separate from `retryOn429`, which handles rate limiting; mid-stream failures are never replayed. |
+| `retryOnReset?` | `{ enabled?: boolean; replacements?: number }` | Native `openai-responses` providers, including `authMode: "forward"`. Opt-in replacement of a send that failed while the caller had observed nothing: absent means off, object presence enables it unless `enabled: false`. Covers both ambiguous stages — a connection that died before any response header, and an SSE body that died after the header while carrying only control events. Only a self-contained request is ever replaced: `store: false`, complete `input`, no `previous_response_id`, `conversation` or `stream_id`, and only client-executed tools. `replacements` is the number of replacement sends ONE logical request may make across every leg and every combo child (1..2, default 1) — not a per-leg retry count and not a send budget, so a replacement still has to fit inside the send allowance the leg already had. A request that already emitted output or a tool call is never replaced, whatever this is set to. The replacement inference may still be billed if the origin had already started the first one, which is why this is off by default. |
 | `autoToolChoiceOnlyModels?` | `string[]` | Models whose `tool_choice` accepts only `auto` or `none`; forced choices are downgraded. |
 | `preserveReasoningContentModels?` | `string[]` | Models requiring prior assistant `reasoning_content` in chat history. |
 | `reasoningDetailsModels?` | `string[]` | Models whose endpoint returns thinking as a structured `reasoning_details` array (MiniMax M-series with `reasoning_split`); stream deltas are cumulative snapshots that are prefix-diffed, and preserved reasoning replays as a `reasoning_details` array instead of a `reasoning_content` string. |
@@ -238,6 +263,11 @@ mode, or base URL during search or provider pacing ends the turn with a bridge e
 provider request is sent. Changing away and back also ends that continuation. Start a new turn to
 use the new selection. Selection changes before the first provider send retain normal reselection.
 
+A bridged search result is shown to the provider again on the conversation's next turn only for
+the same caller, conversation, provider, model and selected key. The caller is identified by the
+opencodex API key it presents, so a client that sends no opencodex API key gets no such replay:
+its earlier search cells reach the provider unchanged, as they do for a provider without the bridge.
+
 Custom-model `reasoningEfforts` normally override discovered provider metadata. The bounded
 exception is an explicit custom row whose model id has pinned native Codex capabilities,
 including Astra or Daybreak on an arbitrary gateway: its advertised list is intersected with
@@ -246,6 +276,66 @@ that model's pinned native capabilities. Full native identity still requires the
 nonempty incompatible list falls back to the native default as a single choice. Defaults must
 belong to the final list. This changes the catalog projection, not stored configuration.
 See [custom native catalog examples](/guides/codex-app-models/).
+
+### Per-provider egress
+
+Set `proxy` on a provider when that upstream needs a different exit from the process-wide proxy:
+
+- Omit `proxy` to inherit the global proxy and `NO_PROXY` decision.
+- Set `proxy` to `"direct"` or `null` to force this provider to connect directly, even when a global proxy is set.
+- Set `proxy` to an absolute `http://` or `https://` URL to use that HTTP proxy for this provider.
+- Set `proxy` to an absolute `socks5://` or `socks5h://` URL to use that SOCKS5 proxy for this provider.
+
+An empty or whitespace-only string is rejected on purpose. A cleared field must not silently change
+from “inherit the global proxy” to “force direct”; remove the field to inherit, or write `"direct"`
+to choose direct egress explicitly.
+
+`noProxy` accepts a comma-separated string or an array of strings in `NO_PROXY` syntax. It is
+evaluated for each request. A matching destination goes direct whether the provider would otherwise
+use its own `proxy` or inherit a global proxy.
+
+#### What the route covers
+
+The route is applied to routed inference, provider discovery and connection tests, and API-key
+quota probes. Some transports cannot carry it, and OpenCodex says so rather than pretending
+otherwise:
+
+- **OAuth token exchange and refresh** keep using the process-wide proxy. These reach fixed vendor
+  endpoints from code that holds no provider configuration, so a provider pinned to its own proxy
+  or to `"direct"` still refreshes its credentials by the global route. OAuth-backed quota probes
+  and API-key validation probes behave the same way.
+- **The Responses WebSocket fast lane** selects its proxy when it dials and cannot carry a
+  per-provider route, so a provider that declares one serves those turns over HTTP/SSE instead and
+  logs a one-time notice.
+- **Cursor's default HTTP/2 transport**, the **CodeBuddy and Qoder subprocess providers** (their
+  child environment omits proxy variables), and the **Compatibility Lab** pinned sender do not
+  apply it.
+- Endpoints that do not route a model — image generation and edits, audio transcription, live and
+  realtime calls, and unqualified `/v1/alpha/search` — have no provider route to apply.
+
+A provider configured with a custom `fetch` executor is refused rather than silently sent by the
+executor's own route.
+
+This example keeps a global proxy for ordinary traffic, sends one provider through a regional HTTP
+proxy, and pins another provider to a direct connection:
+
+```json
+{
+  "proxy": "http://global-proxy.example:8080",
+  "providers": {
+    "regional-gateway": {
+      "adapter": "openai-chat",
+      "baseUrl": "https://regional-api.example/v1",
+      "proxy": "http://regional-proxy.example:3128"
+    },
+    "direct-gateway": {
+      "adapter": "openai-chat",
+      "baseUrl": "https://direct-api.example/v1",
+      "proxy": "direct"
+    }
+  }
+}
+```
 
 ### Operator-pinned reasoning effort
 
@@ -418,7 +508,7 @@ Grok — so the Cursor entry declares `fastWire.kind: "cursor-variant"` and the 
 builder resolves the variant instead of setting a request field.
 
 Only the bases that actually declare a fast variant advertise Fast: `claude-opus-4-7`,
-`claude-opus-4-8`, `claude-opus-5`, `grok-4.5`, `grok-4.6`. Every other Cursor row publishes
+`claude-opus-4-8`, `claude-opus-5`, `claude-opus-5-5`, `grok-4.5`, `grok-4.6`. Every other Cursor row publishes
 `supportsServiceTier: false`, so Codex shows no toggle rather than a dead one.
 
 A base whose umbrella row routes thinking upgrades to its **thinking-fast** variant, not to

@@ -32,6 +32,7 @@ import {
   quotaResetNotifySchema,
   remoteGuiConfigSchema,
   retryOn429PolicySchema,
+  retryOnResetPolicySchema,
   runtimeRoleSchema,
   spendSchema,
 } from "./schema/leaf-validators";
@@ -195,18 +196,44 @@ export function sanitizeRetryOn429ForLoad(parsed: unknown): void {
  * redacted (a malformed write can place a secret in a property name).
  */
 export function retryOn429PolicyConfigError(policy: unknown): string | null {
+  return strictPolicyConfigError("retryOn429", retryOn429PolicySchema, policy);
+}
+
+/**
+ * Management write-boundary validation for `retryOnReset`, with the same fail-closed contract
+ * as `retryOn429PolicyConfigError`: the load-time schema degrades a malformed block to
+ * "absent", so this is the one place a bad value is refused instead of silently dropped.
+ */
+export function retryOnResetPolicyConfigError(policy: unknown): string | null {
+  return strictPolicyConfigError("retryOnReset", retryOnResetPolicySchema, policy);
+}
+
+/**
+ * The shared body of both. Written once because the two differ only in the field name they
+ * report, and a second hand-copied formatter is a second place for the redaction to be
+ * forgotten.
+ */
+function strictPolicyConfigError(
+  field: string,
+  schema: {
+    safeParse: (value: unknown) => { success: true } | {
+      success: false;
+      error: { issues: Array<{ code: string; message: string; path: PropertyKey[]; keys?: string[] }> };
+    };
+  },
+  policy: unknown,
+): string | null {
   if (policy === undefined) return null;
-  const result = retryOn429PolicySchema.safeParse(policy);
+  const result = schema.safeParse(policy);
   if (result.success) return null;
   const first = result.error.issues[0];
-  if (!first) return "retryOn429 is invalid";
-  if (first.code === "unrecognized_keys") {
+  if (!first) return `${field} is invalid`;
+  if (first.code === "unrecognized_keys" && first.keys) {
     const names = first.keys.map(key => JSON.stringify(redactSecretString(key))).join(", ");
-    return `retryOn429 has unrecognized field${first.keys.length > 1 ? "s" : ""}: ${names}`;
+    return `${field} has unrecognized field${first.keys.length > 1 ? "s" : ""}: ${names}`;
   }
-  if (first.path.length === 0) return `retryOn429 is invalid (${first.message})`;
-  const field = String(first.path[first.path.length - 1]);
-  return `retryOn429.${field} is invalid (${first.message})`;
+  if (first.path.length === 0) return `${field} is invalid (${first.message})`;
+  return `${field}.${String(first.path[first.path.length - 1])} is invalid (${first.message})`;
 }
 
 export function sanitizeCapabilityDeclarationsForLoad(parsed: unknown): void {
@@ -393,10 +420,9 @@ export function degradedCredentialGroupsWarning(rawParsed: unknown): string | nu
   if (!pool || pool.credentialGroups === undefined) return null;
   const parsed = credentialGroupsSchema.safeParse(pool.credentialGroups);
   if (parsed.success) return null;
-  // Every issue message is redacted before it is joined. The custom messages embed the
-  // offending member through `JSON.stringify`, so a malformed credential string that
-  // happens to carry secret material would otherwise be printed verbatim at config load
-  // — a config file is exactly where a pasted token ends up in the wrong field.
+  // Every issue message is redacted before it is joined. The custom messages now name
+  // group/member positions instead of the offending strings; the redaction stays as a
+  // second layer for any schema default message that still embeds a value.
   const details = parsed.error.issues.map(issue => redactSecretString(issue.message)).join("; ");
   return `pool.credentialGroups is invalid (${details}) — declared quota grouping is disabled; other pool settings were preserved`;
 }

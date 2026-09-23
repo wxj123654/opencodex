@@ -45,6 +45,13 @@ const GPT56_SOL: Cost4 = { input: 4, output: 20, cacheRead: 0.4, cacheWrite: 5 }
 const GPT6_ASTRA: Cost4 = { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 };
 const ASTRA_API_PRICING = "https://developers.openai.com/api/docs/models/gpt-6-astra";
 /**
+ * GPT-6 Sol and Luna API list prices (released 2026-09-22; the changelog publishes input, cached
+ * input and output). Cache write follows the 1.25x-input convention every OpenAI row here uses.
+ */
+const GPT6_SOL: Cost4 = { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 };
+const GPT6_LUNA: Cost4 = { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 };
+const GPT6_API_PRICING = "https://developers.openai.com/api/docs/changelog (2026-09-22: GPT-6 Sol $2 / $0.20 cached / $10; GPT-6 Luna $0.10 / $0.01 cached / $0.50)";
+/**
  * Daybreak aliases. `daybreak-*-latest` never appears in the pricing table itself — only its
  * current snapshot does — so these tuples are the snapshot's published rates and carry
  * `verified-derived`. That status also keeps the `estimated` marker on, which matters more
@@ -101,12 +108,17 @@ const CLAUDE_OPUS_46: Cost4 = { input: 5, output: 25, cacheRead: 0.5, cacheWrite
 // (0.25) on Fable 5.1 — NOT the 0.1x (1.00) that Fable 5 and every other family use;
 // the pricing page footnote calls this out explicitly. Verified 2026-09-02.
 const CLAUDE_FABLE_51: Cost4 = { input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5 };
-// Opus 5 is priced from the maintainer's confirmation that it matches the previous
-// Opus, not from a published Opus 5 page. Hence `verified-derived`, and a source
-// string that states the provenance instead of pointing at ANTHROPIC_PRICING.
-const CLAUDE_OPUS_5_DERIVED_SOURCE =
-  "user-confirmed: claude-opus-5 matches Claude Opus 4.6; no separate Anthropic Opus 5 price page verified";
+// Opus 5 was first priced from the maintainer's confirmation that it matched Opus 4.6. The
+// pricing page now lists it at that same 5 / 25 / 0.50 / 6.25 tuple (re-verified 2026-09-23).
+const CLAUDE_OPUS_5 = CLAUDE_OPUS_46;
+// Claude Opus 5.5 (claude-opus-5-5, released 2026-09-22): 4 / 20, 5m cache write 5.00. Cache
+// hits are 0.05x base input (0.20), a model-specific footnote on the pricing page, NOT the
+// 0.1x most families use. 1M context and 128K output at one flat rate (no long-context tier).
+const CLAUDE_OPUS_55: Cost4 = { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 };
 const ANTHROPIC_PRICING = "https://platform.claude.com/docs/en/about-claude/pricing (official; 5m cache-write tier)";
+const CLAUDE_OPUS_5_SOURCE = `anthropic official Claude Opus 5 ${ANTHROPIC_PRICING}`;
+const CLAUDE_OPUS_55_SOURCE = `anthropic official Claude Opus 5.5 ${ANTHROPIC_PRICING}; cache hit = 0.05x base input`;
+const CURSOR_OPUS_55_PRICING = "https://cursor.com/docs/models/claude-opus-5-5 (Cursor Other Models pool; same list rate as Anthropic, Fast Mode billed separately)";
 
 const GEMINI_PRICING = "https://ai.google.dev/gemini-api/docs/pricing (2026-07-22); cacheWrite=0: storage is billed per-hour, not per-token";
 const GEMINI_37_PRICING = "https://ai.google.dev/gemini-api/docs/pricing (2026-08-14); promotional rate through 2026-12-31, rises to 1.50/7.50 on 2027-01-01; cacheWrite=0: storage is billed per-hour, not per-token";
@@ -190,6 +202,10 @@ export const EXPECTED_PRICE_OVERLAYS: readonly ExpectedPriceOverlay[] = [
   { provider: "openai-apikey", modelId: "gpt-6-astra", cost4: GPT6_ASTRA, source: ASTRA_API_PRICING, verifiedAt: "2026-09-05", status: "verified" },
   // Display estimates use API prices for both login and API-key routes, including cache writes.
   { provider: "openai", modelId: "gpt-6-astra", cost4: GPT6_ASTRA, source: `API-reference comparison estimate: ${ASTRA_API_PRICING}`, verifiedAt: "2026-09-05", status: "verified-derived" },
+  { provider: "openai-apikey", modelId: "gpt-6-sol", cost4: GPT6_SOL, source: GPT6_API_PRICING, verifiedAt: "2026-09-23", status: "verified" },
+  { provider: "openai-apikey", modelId: "gpt-6-luna", cost4: GPT6_LUNA, source: GPT6_API_PRICING, verifiedAt: "2026-09-23", status: "verified" },
+  { provider: "openai", modelId: "gpt-6-sol", cost4: GPT6_SOL, source: `API-reference comparison estimate: ${GPT6_API_PRICING}`, verifiedAt: "2026-09-23", status: "verified-derived" },
+  { provider: "openai", modelId: "gpt-6-luna", cost4: GPT6_LUNA, source: `API-reference comparison estimate: ${GPT6_API_PRICING}`, verifiedAt: "2026-09-23", status: "verified-derived" },
   // claude-fable-5-1 now HAS a generated jawcode row, so the two Anthropic surfaces resolve
   // from it and these overlays are the fallback rather than the primary source. They stay:
   // the overlay lookup is keyed by the configured provider id, so an account-pool log label
@@ -203,9 +219,15 @@ export const EXPECTED_PRICE_OVERLAYS: readonly ExpectedPriceOverlay[] = [
   // cost resolution returned null and the Logs `~$` column rendered an em dash. The
   // model-level vendor fallback only searches jawcode metadata, never overlays, so one
   // anthropic row would not cover cursor/kiro — each exposing provider needs its own.
-  { provider: "anthropic", modelId: "claude-opus-5", cost4: CLAUDE_OPUS_46, source: CLAUDE_OPUS_5_DERIVED_SOURCE, verifiedAt: "2026-07-25", status: "verified-derived" },
-  { provider: "cursor", modelId: "claude-opus-5", cost4: CLAUDE_OPUS_46, source: CLAUDE_OPUS_5_DERIVED_SOURCE, verifiedAt: "2026-07-25", status: "verified-derived" },
-  { provider: "kiro", modelId: "claude-opus-5", cost4: CLAUDE_OPUS_46, source: CLAUDE_OPUS_5_DERIVED_SOURCE, verifiedAt: "2026-07-25", status: "verified-derived" },
+  { provider: "anthropic", modelId: "claude-opus-5", cost4: CLAUDE_OPUS_5, source: CLAUDE_OPUS_5_SOURCE, verifiedAt: "2026-09-23", status: "verified" },
+  { provider: "cursor", modelId: "claude-opus-5", cost4: CLAUDE_OPUS_5, source: `${CLAUDE_OPUS_5_SOURCE}; vendor list price applied to the Cursor surface`, verifiedAt: "2026-09-23", status: "verified-derived" },
+  { provider: "kiro", modelId: "claude-opus-5", cost4: CLAUDE_OPUS_5, source: `${CLAUDE_OPUS_5_SOURCE}; vendor list price applied to the Kiro credit surface`, verifiedAt: "2026-09-23", status: "verified-derived" },
+  // Claude Opus 5.5. The anthropic bundle row wins for the bare provider id; these overlays
+  // cover account-label namespaces. Cursor publishes the same list rate on its own model page.
+  { provider: "anthropic", modelId: "claude-opus-5-5", cost4: CLAUDE_OPUS_55, source: CLAUDE_OPUS_55_SOURCE, verifiedAt: "2026-09-23", status: "verified" },
+  { provider: "anthropic-apikey", modelId: "claude-opus-5-5", cost4: CLAUDE_OPUS_55, source: CLAUDE_OPUS_55_SOURCE, verifiedAt: "2026-09-23", status: "verified" },
+  // Cursor canonicalizes every Opus 5.5 spelling (thinking/effort/fast suffixes) onto this row.
+  { provider: "cursor", modelId: "claude-opus-5-5", cost4: CLAUDE_OPUS_55, source: CURSOR_OPUS_55_PRICING, verifiedAt: "2026-09-23", status: "verified" },
   // MiniMax M2.1 highspeed — published PAYG price (verified).
   { provider: "minimax", modelId: "MiniMax-M2.1-highspeed", cost4: MINIMAX_M21_HIGHSPEED, source: MINIMAX_PRICING, verifiedAt: "2026-07-20", status: "verified" },
   { provider: "minimax-cn", modelId: "MiniMax-M2.1-highspeed", cost4: MINIMAX_M21_HIGHSPEED, source: MINIMAX_PRICING, verifiedAt: "2026-07-20", status: "verified" },
@@ -371,7 +393,10 @@ export const EXPECTED_PRICE_OVERLAYS: readonly ExpectedPriceOverlay[] = [
   { provider: "devin-cli", modelId: "swe-1-6", cost4: DEVIN_SWE_17, source: DEVIN_PRICING, verifiedAt: "2026-09-13", status: "verified-derived" },
   { provider: "devin-cli", modelId: "gpt-5-6-sol", cost4: GPT56_SOL, source: `enterprise list column (self-serve shows discounted 1.2/6); ${DEVIN_PRICING}`, verifiedAt: "2026-09-13", status: "verified-derived" },
   { provider: "devin-cli", modelId: "gpt-6-astra", cost4: GPT6_ASTRA, source: DEVIN_PRICING, verifiedAt: "2026-09-13", status: "verified-derived" },
+  { provider: "devin-cli", modelId: "gpt-6-sol", cost4: GPT6_SOL, source: `derived: GPT-6 Sol/Luna added 2026-09-23 ahead of Devin's modelCostData table; OpenAI API list price ${GPT6_API_PRICING}`, verifiedAt: "2026-09-23", status: "verified-derived" },
+  { provider: "devin-cli", modelId: "gpt-6-luna", cost4: GPT6_LUNA, source: `derived: GPT-6 Sol/Luna added 2026-09-23 ahead of Devin's modelCostData table; OpenAI API list price ${GPT6_API_PRICING}`, verifiedAt: "2026-09-23", status: "verified-derived" },
   { provider: "devin-cli", modelId: "claude-opus-5", cost4: CLAUDE_OPUS_46, source: DEVIN_PRICING, verifiedAt: "2026-09-13", status: "verified-derived" },
+  { provider: "devin-cli", modelId: "claude-opus-5-5", cost4: CLAUDE_OPUS_55, source: `derived: live Devin catalog lists claude-opus-5-5 but Devin's modelCostData table does not yet; Anthropic list price shown as estimate ${ANTHROPIC_PRICING}`, verifiedAt: "2026-09-23", status: "verified-derived" },
   { provider: "devin-cli", modelId: "claude-fable-5-1", cost4: CLAUDE_FABLE_51, source: DEVIN_PRICING, verifiedAt: "2026-09-13", status: "verified-derived" },
   { provider: "devin-cli", modelId: "claude-sonnet-5", cost4: DEVIN_SONNET_5, source: DEVIN_PRICING, verifiedAt: "2026-09-13", status: "verified-derived" },
   { provider: "devin-cli", modelId: "glm-5-3", cost4: GLM_53, source: DEVIN_PRICING, verifiedAt: "2026-09-13", status: "verified-derived" },
@@ -385,7 +410,10 @@ export const EXPECTED_PRICE_OVERLAYS: readonly ExpectedPriceOverlay[] = [
   { provider: "devin", modelId: "gpt-5-6-sol", cost4: GPT56_SOL, source: `enterprise list column (self-serve shows discounted 1.2/6); ${DEVIN_PRICING}`, verifiedAt: "2026-09-13", status: "verified-derived" },
   { provider: "devin", modelId: "gpt-5-6-luna", cost4: GPT56_LUNA, source: DEVIN_PRICING, verifiedAt: "2026-09-13", status: "verified-derived" },
   { provider: "devin", modelId: "gpt-5-6-terra", cost4: GPT56_TERRA, source: DEVIN_PRICING, verifiedAt: "2026-09-13", status: "verified-derived" },
+  { provider: "devin", modelId: "gpt-6-sol", cost4: GPT6_SOL, source: `derived: GPT-6 Sol/Luna added 2026-09-23 ahead of Devin's modelCostData table; OpenAI API list price ${GPT6_API_PRICING}`, verifiedAt: "2026-09-23", status: "verified-derived" },
+  { provider: "devin", modelId: "gpt-6-luna", cost4: GPT6_LUNA, source: `derived: GPT-6 Sol/Luna added 2026-09-23 ahead of Devin's modelCostData table; OpenAI API list price ${GPT6_API_PRICING}`, verifiedAt: "2026-09-23", status: "verified-derived" },
   { provider: "devin", modelId: "claude-opus-4-8", cost4: CLAUDE_OPUS_46, source: DEVIN_PRICING, verifiedAt: "2026-09-13", status: "verified-derived" },
+  { provider: "devin", modelId: "claude-opus-5-5", cost4: CLAUDE_OPUS_55, source: `derived: live Devin catalog lists claude-opus-5-5 but Devin's modelCostData table does not yet; Anthropic list price shown as estimate ${ANTHROPIC_PRICING}`, verifiedAt: "2026-09-23", status: "verified-derived" },
   { provider: "devin", modelId: "claude-fable-5-1", cost4: CLAUDE_FABLE_51, source: DEVIN_PRICING, verifiedAt: "2026-09-13", status: "verified-derived" },
   { provider: "devin", modelId: "claude-sonnet-5", cost4: DEVIN_SONNET_5, source: DEVIN_PRICING, verifiedAt: "2026-09-13", status: "verified-derived" },
   { provider: "devin", modelId: "glm-5-2", cost4: GLM_52, source: `enterprise list column (self-serve shows an unannounced 0 promo); ${DEVIN_PRICING}`, verifiedAt: "2026-09-13", status: "verified-derived" },
@@ -563,6 +591,8 @@ const UNIFORM_DOUBLE: Cost4 = { input: 2, output: 2, cacheRead: 2, cacheWrite: 2
 const OPENAI_PRICING_DOC = "https://developers.openai.com/api/docs/pricing";
 const OPENAI_CONTEXT_MODELS = [
   "gpt-6-astra",
+  "gpt-6-sol",
+  "gpt-6-luna",
   "gpt-5.6-sol",
   "gpt-5.6-terra",
   "gpt-5.6-luna",

@@ -1,6 +1,7 @@
-import { isNativeOpenAIChatTarget, openAIChatTransport, stripBracketedModelSuffix } from "./wire";
+import { openAIChatTransport, stripBracketedModelSuffix } from "./wire";
 import type { AdapterRequest } from "../base";
 import { frameAgentRouterMessages } from "../agentrouter";
+import { applyExplicitChatDeveloperRole } from "./developer-role";
 import { openRouterProviderPayload, resolveOpenRouterRouting } from "../../providers/openrouter-routing";
 import { resolveVercelGatewayRouting, vercelGatewayProviderPayload } from "../../providers/vercel-gateway-routing";
 import { fastPolicyForModel } from "../../providers/service-tier";
@@ -9,6 +10,8 @@ import { debugProviderDiagnostic } from "../../lib/debug";
 import { isDebugEnabled } from "../../lib/debug-settings";
 import { modelRecordValue } from "../../reasoning-effort";
 import { modelInList, type OcxProviderConfig } from "../../types";
+import { chatParallelToolCallsWireValue } from "./parallel-tool-calls";
+import { applyExplicitChatReasoningWirePolicy } from "./reasoning-wire";
 
 const CHAT_PASSTHROUGH_FIELDS = [
   "audio",
@@ -37,35 +40,6 @@ const CHAT_PASSTHROUGH_FIELDS = [
 ] as const;
 
 /**
- * Chat passthrough whitelists fields, so caller message roles ride through untouched. The
- * `developer` role is OpenAI-exclusive wire vocabulary: strict OpenAI-compatible backends
- * reject it outright (Zhipu GLM answers HTTP 400 code 1214 "Incorrect role information"),
- * while clients sitting behind the proxy can only see this proxy's endpoint — not the
- * upstream host — so their OpenAI-host detection never fires and they send `developer`
- * whenever they would send it to OpenAI itself. The translated Chat path already gates
- * developer messages behind `isNativeOpenAIChatTarget`; the passthrough must normalize to
- * `system` the same way instead of forwarding vocabulary the upstream never agreed to
- * accept. Semantic loss is minimal: `developer` carries instructions, and `system` is the
- * instruction channel on every non-OpenAI chat backend.
- */
-function normalizePassthroughDeveloperRoles(provider: OcxProviderConfig, messages: unknown): unknown {
-  if (isNativeOpenAIChatTarget(provider) || !Array.isArray(messages)) return messages;
-  let hasDeveloper = false;
-  for (const msg of messages) {
-    if ((msg as { role?: unknown } | null)?.role === "developer") {
-      hasDeveloper = true;
-      break;
-    }
-  }
-  if (!hasDeveloper) return messages;
-  return messages.map((msg) => {
-    const rec = msg as Record<string, unknown> | null;
-    if (rec?.role !== "developer") return msg;
-    return { ...rec, role: "system" };
-  });
-}
-
-/**
  * Build a provider request from an inbound Chat Completions body without translating it
  * through the Responses contract. This is deliberately a whitelist: Chat-only caller
  * fields retain their exact wire representation, while provider capability gates remain
@@ -83,9 +57,15 @@ export function buildOpenAIChatPassthroughRequest(
 
   const body: Record<string, unknown> = {
     model: provider.modelSuffixBracketStrip ? stripBracketedModelSuffix(modelId) : modelId,
-    messages: normalizePassthroughDeveloperRoles(
-      provider,
+    // The caller's messages are forwarded as they arrived, with one exception: an operator who
+    // recorded that this destination rejects the `developer` role gets that role converted in
+    // place. Verbatim was not neutral there — it sent the role anyway and the turn failed
+    // upstream with a 400 before the model saw it. An unrecorded destination is still verbatim,
+    // and the conversion changes the role of those messages and nothing else, so the position
+    // of every message and every other field survive unchanged.
+    messages: applyExplicitChatDeveloperRole(
       frameAgentRouterMessages(provider.baseUrl, rawBody.messages),
+      provider,
     ),
     stream,
   };
@@ -93,9 +73,21 @@ export function buildOpenAIChatPassthroughRequest(
     if (rawBody[field] !== undefined) body[field] = rawBody[field];
   }
   const rawEfforts = modelRecordValue(provider.modelReasoningEfforts, modelId) ?? provider.reasoningEfforts;
-  if (modelInList(provider.noReasoningModels, modelId) || rawEfforts?.length === 0) {
+  const reasoningDisabled = modelInList(provider.noReasoningModels, modelId) || rawEfforts?.length === 0;
+  if (reasoningDisabled) {
     delete body.reasoning_effort;
   }
+  const hasTools = Array.isArray(rawBody.tools) && rawBody.tools.length > 0;
+  const requestedEffort = typeof body.reasoning_effort === "string" ? body.reasoning_effort : undefined;
+  applyExplicitChatReasoningWirePolicy({
+    provider,
+    modelId,
+    hasTools,
+    requestedEffort,
+    wireEffort: requestedEffort,
+    reasoningDisabled,
+    body,
+  });
 
   const openRouterRouting = resolveOpenRouterRouting(provider, modelId);
   if (openRouterRouting) body.provider = openRouterProviderPayload(openRouterRouting);
@@ -139,13 +131,13 @@ export function buildOpenAIChatPassthroughRequest(
   if (provider.promptCacheKey && rawBody.prompt_cache_key !== undefined) {
     body.prompt_cache_key = rawBody.prompt_cache_key;
   }
-  if (Array.isArray(rawBody.tools) && rawBody.tools.length > 0) {
-    if (provider.parallelToolCalls === true) {
-      body.parallel_tool_calls = rawBody.parallel_tool_calls !== false;
-    } else if (provider.parallelToolCalls === false
-        && (provider.baseUrl === "https://integrate.api.nvidia.com/v1" || provider.pinParallelToolCallsFalse === true)) {
-      body.parallel_tool_calls = false;
-    }
+  if (hasTools) {
+    // Same three provider states as the translated path, and the same defect in the unset one:
+    // a caller's explicit false was dropped here too (#5211). The native route reads the bit off
+    // the raw request rather than the parsed options, since nothing projects this body.
+    const requested = typeof rawBody.parallel_tool_calls === "boolean" ? rawBody.parallel_tool_calls : undefined;
+    const parallelToolCalls = chatParallelToolCallsWireValue(provider, requested);
+    if (parallelToolCalls !== undefined) body.parallel_tool_calls = parallelToolCalls;
   }
   if (stream) {
     const callerOptions = rawBody.stream_options !== null

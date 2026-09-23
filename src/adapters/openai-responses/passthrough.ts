@@ -42,6 +42,7 @@ import { bridgeSearchReplayScope } from "../../responses/bridge-search-replay-ca
 import { applyTierDecisionToResponsesBody, normalizeCanonicalForwardContinuationEnvelope, normalizeCanonicalForwardPromptEnvelope, stripCanonicalForwardSamplingParams, stripPreviousResponseId, stripStatefulResponsesParams, stripUnsupportedForwardParams } from "./canonical-forward";
 import { normalizeImageGenClientTools, preferConfiguredHostedTools } from "./image-gen";
 import { stripMuseSparkUnsupportedWebSearchFields, stripOpenAiOnlyWebSearchFields } from "./web-search";
+import { observeOutbound } from "../../usage/cache-diagnostic";
 
 /**
  * Identifies DeepSeek's strict Responses replay contract: tool-bearing continuations need
@@ -328,11 +329,11 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       outBody = stripUnsupportedReasoningSummaryDelivery(outBody, parsed.modelId);
       // #4587: on a bridged provider, hand the destination back the search call and result the
       // proxy executed on its behalf, in place of the hosted cell the caller replays. Scoped to
-      // this destination and recorded by the bridge itself, so a provider without the opt-in
-      // computes no identity and keeps the body reference it already had. This runs before the
-      // query backfill below because a restored cell is no longer a web_search_call to repair.
+      // its exact conversation and serving identity and recorded by the bridge itself, so a
+      // provider without the opt-in computes no identity and keeps the body reference it already
+      // had. This runs before query backfill because a restored cell is no longer one to repair.
       if (provider.webSearchBridge?.enabled === true) {
-        outBody = restoreBridgedWebSearchCalls(outBody, bridgeSearchReplayScope(provider.baseUrl));
+        outBody = restoreBridgedWebSearchCalls(outBody, bridgeSearchReplayScope(parsed._reasoningReplayScope));
       }
       // Repair stored history from before the bridge emitted both keys, in either
       // direction: a conversation that already recorded a web_search_call replays it
@@ -501,6 +502,7 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       // here, on the serialized body, not on the parsed selector. One place covers both the
       // HTTP and the WebSocket outbound, because the WS path transports this same request
       // instead of rebuilding it.
+      observeOutbound(parsed._rawBody, finalBody, headers);
       const body = JSON.stringify(finalBody);
       const releaseBodyObservation = translatorBudget.observeExternallyCapped(
         "passthrough_serialization",
