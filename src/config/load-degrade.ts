@@ -17,7 +17,7 @@ import { MODEL_ALIAS_PATTERN } from "../providers/default-aliases";
 import { MODEL_DISCOVERY_MAX_MODELS } from "../providers/model-discovery-limits";
 import { getProviderRegistryEntry, providerMatchesRegistryTransport, registryModelServiceTierCapabilityApplies } from "../providers/registry";
 import { isCodexReasoningEffort } from "../reasoning-effort";
-import { refreshUserCostOverlays } from "../usage/user-cost-overlays";
+import { refreshConfigDerivedRegistries } from "./derived-registries";
 import { type OcxClaudeCodeConfig, type OcxConfig } from "../types";
 import {
   agentTaskRecoverySchema,
@@ -26,6 +26,7 @@ import {
   isUsableApiKeySecret,
   managementIngressSchema,
   codexPoolSchema,
+  codexAccountAutoSwitchThresholdsSchema,
   providerModelCostsConfigError,
   credentialGroupsSchema,
   hubConfigSchema,
@@ -388,6 +389,12 @@ export function degradedCodexAccountPriorityWarnings(rawParsed: unknown, validat
   const raw = record?.codexAccountPriorities;
   if (raw !== undefined && validated.codexAccountPriorities === undefined) {
     warnings.push("codexAccountPriorities is invalid (expected account ids mapped to integers between -100 and 100) — account selection order is disabled");
+  }
+  const rawThresholds = record?.codexAccountAutoSwitchThresholds;
+  if (rawThresholds !== undefined && !codexAccountAutoSwitchThresholdsSchema.safeParse(rawThresholds).success) {
+    warnings.push(validated.codexAccountAutoSwitchThresholds === undefined
+      ? "codexAccountAutoSwitchThresholds is invalid (expected account ids mapped to integers between 0 and 100) — per-account usage thresholds are disabled"
+      : "codexAccountAutoSwitchThresholds contains invalid entries (expected account ids mapped to integers between 0 and 100) — invalid entries were ignored");
   }
   return warnings;
 }
@@ -934,6 +941,6 @@ export function sanitizeModelDisplayNamesForLoad(raw: unknown): void {
 
 /** Refresh the user cost-overlay registry from `config` and return it unchanged. */
 export function withRefreshedCostOverlays(config: OcxConfig): OcxConfig {
-  refreshUserCostOverlays(config);
+  refreshConfigDerivedRegistries(config);
   return config;
 }

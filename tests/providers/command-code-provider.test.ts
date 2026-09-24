@@ -11,13 +11,12 @@ import { budgetOwner } from "../helpers/send-budget-owner";
 import type { OcxConfig } from "../../src/types";
 import { commandCodeSessionId, createCommandCodeAdapter } from "../../src/adapters/command-code";
 import { loginCommandCode, parseCommandCodeCallback, shouldImportLocalCommandCodeAuth } from "../../src/oauth/command-code";
-import { buildModelsRequest, OAUTH_PROVIDERS } from "../../src/oauth";
+import { buildModelsRequest, OAUTH_PROVIDERS, submitManualLoginCode } from "../../src/oauth";
+import { clearManualCodeSlot, loginState, waitForManualLoginCode } from "../../src/oauth/login-flow-state";
 import {
   commandCodeReasoningEfforts,
-  ensureCommandCodeProfileCatalog,
-  parseCommandCodeProfileEfforts,
+  PROFILE_PAGE_MAX_BYTES,
   refreshCommandCodeReasoningEfforts,
-  removeCommandCodeEffort,
   resetCommandCodeReasoningEffortsForTest,
 } from "../../src/providers/command-code-efforts";
 import { PROVIDER_REGISTRY } from "../../src/providers/registry";
@@ -50,34 +49,6 @@ async function builtRequest(...args: Parameters<ReturnType<typeof createCommandC
 }
 
 afterEach(() => resetCommandCodeReasoningEffortsForTest());
-
-/*
- * Synthetic Command Code profile-page fixture. The real pages embed the whole
- * model catalog in one flat serialized React Router flight array, delivered as
- *
- *   window.__reactRouterContext.streamController.enqueue("[{...}]")
- *
- * where integers are references to other slots and effort ladders are arrays of
- * references to the effort words. JSON.stringify on the JSON text produces a
- * JS literal whose escapes line up with the JSON document, exactly like the
- * live pages.
- */
-const FLIGHT_WORDS = ["low", "medium", "high", "xhigh", "max"];
-// Effort words always occupy the first five slots of a fixture flat array, so
-// refs are independent of the rest payload and safe to use inside its arguments.
-function flightRef(word: string): number {
-  const index = FLIGHT_WORDS.indexOf(word);
-  if (index === -1) throw new Error(`not a flight effort word: ${word}`);
-  return index;
-}
-function flightFlat(...rest: unknown[]): unknown[] {
-  return [...FLIGHT_WORDS, ...rest];
-}
-function flightPage(flat: unknown[]): string {
-  const literal = JSON.stringify(JSON.stringify(flat));
-  return `<html><script>window.__reactRouterContext.streamController.enqueue(${literal})</script>`
-    + `<script>window.__reactRouterContext.streamController.close()</script></html>`;
-}
 
 describe("Command Code provider", () => {
   test("empty-completion OAuth continuation counts initial sends and keeps its prepaid hop charged", async () => {
@@ -140,7 +111,6 @@ describe("Command Code provider", () => {
     expect(registry?.models).toBeUndefined();
     expect(registry?.modelReasoningEfforts).toMatchObject({
       "deepseek/deepseek-v4-flash": ["high", "max"],
-      "deepseek/deepseek-v4.1-flash": ["high", "max"],
       "zai-org/GLM-5.2": ["high", "max"],
     });
     expect(OAUTH_PROVIDERS["command-code"]?.providerConfig).toMatchObject({
@@ -209,25 +179,25 @@ describe("Command Code provider", () => {
     const apiKey = PROVIDER_REGISTRY.find(row => row.id === "commandcode");
     for (const [label, entry] of [["oauth", oauth], ["api-key", apiKey]] as const) {
       expect(entry?.modelReasoningEfforts?.["deepseek/deepseek-v4.1-flash"], `${label} preset ladder`)
-        .toEqual(["high", "max"]);
+        .toEqual(["low", "high", "max"]);
       expect(entry?.modelReasoningEfforts?.["Qwen/Qwen3.8-Flash"], `${label} preset ladder`)
-        .toEqual(["low", "medium", "high", "max"]);
+        .toEqual(["low", "medium", "high", "xhigh", "max"]);
     }
-    expect(commandCodeReasoningEfforts("deepseek/deepseek-v4.1-flash")).toEqual(["high", "max"]);
-    expect(commandCodeReasoningEfforts("Qwen/Qwen3.8-Flash")).toEqual(["low", "medium", "high", "max"]);
+    expect(commandCodeReasoningEfforts("deepseek/deepseek-v4.1-flash")).toEqual(["low", "high", "max"]);
+    expect(commandCodeReasoningEfforts("Qwen/Qwen3.8-Flash")).toEqual(["low", "medium", "high", "xhigh", "max"]);
     // The live-discovered id may arrive in any case; the lookup folds it.
-    expect(commandCodeReasoningEfforts("qwen/qwen3.8-flash")).toEqual(["low", "medium", "high", "max"]);
+    expect(commandCodeReasoningEfforts("qwen/qwen3.8-flash")).toEqual(["low", "medium", "high", "xhigh", "max"]);
 
     const deepseekMax = await builtRequest({
       ...parsed("deepseek/deepseek-v4.1-flash"),
       options: { reasoning: "max", maxOutputTokens: 100 },
     });
     expect(JSON.parse(deepseekMax.body).params.reasoning_effort).toBe("max");
-    const qwenMax = await builtRequest({
+    const qwenXhigh = await builtRequest({
       ...parsed("Qwen/Qwen3.8-Flash"),
-      options: { reasoning: "max", maxOutputTokens: 100 },
+      options: { reasoning: "xhigh", maxOutputTokens: 100 },
     });
-    expect(JSON.parse(qwenMax.body).params.reasoning_effort).toBe("max");
+    expect(JSON.parse(qwenXhigh.body).params.reasoning_effort).toBe("xhigh");
   });
 
   test("OAuth and API-key presets share only verified image capabilities", () => {
@@ -235,7 +205,6 @@ describe("Command Code provider", () => {
     const apiKey = PROVIDER_REGISTRY.find(row => row.id === "commandcode");
     const verifiedImageModels = [
       "deepseek/deepseek-v4-flash-vision-exp",
-      "deepseek/deepseek-v4.1-flash",
       "gpt-5.6-luna",
       "gpt-5.6-sol",
       "MiniMaxAI/MiniMax-M3",
@@ -244,12 +213,13 @@ describe("Command Code provider", () => {
       "meta/muse-spark-1.3-contributor",
       "meta/muse-spark-1.2",
       "meta/muse-spark-1.2-contributor",
+      "xai/grok-4.6",
+      "xai/grok-4.7",
     ];
     const verifiedTextOnlyModels = [
       "deepseek/deepseek-v4-flash",
       "zai-org/GLM-5.2",
       "zai-org/GLM-5.3",
-      "xai/grok-4.6",
     ];
 
     expect(apiKey?.modelInputModalities).toEqual(oauth?.modelInputModalities);
@@ -328,6 +298,99 @@ describe("Command Code provider", () => {
       controller.abort(new Error("cancelled"));
       await expect(login).rejects.toThrow("cancelled");
       expect(whoamiCalls).toBeGreaterThan(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("callback JSON pasted through the shared submit path: wrong state re-prompts, hashes survive", async () => {
+    const controller = new AbortController();
+    const originalFetch = globalThis.fetch;
+    const whoamiKeys: string[] = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const href = String(input);
+      if (href.includes("whoami")) {
+        whoamiKeys.push(new Headers(init?.headers).get("authorization") ?? "");
+        return new Response(JSON.stringify({ ok: true, user: { id: "u-1", userName: "alice#1" } }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch: ${href}`);
+    }) as typeof globalThis.fetch;
+    loginState.set("command-code", { done: false });
+    const prompts: string[] = [];
+    let settled: Promise<void> = Promise.resolve();
+    const promptCount = async (count: number) => {
+      for (let i = 0; prompts.length < count && i < 400; i++) await Bun.sleep(5);
+      expect(prompts.length).toBeGreaterThanOrEqual(count);
+    };
+    const callback = (state: string) => JSON.stringify({
+      apiKey: "sk-key#segment",
+      state,
+      userId: "u-1",
+      userName: "alice#1",
+      keyName: "cli",
+    });
+    try {
+      const login = loginCommandCode({
+        onAuth: () => {},
+        onProgress: () => {},
+        onManualCodeInput: state => {
+          prompts.push(state);
+          return waitForManualLoginCode("command-code", controller.signal, state);
+        },
+        signal: controller.signal,
+      }, { importLocal: "off" });
+      // Observe the login from the start so an early assertion failure cannot leave its
+      // rejection unhandled once finally aborts it.
+      settled = login.then(() => undefined, () => undefined);
+      await promptCount(1);
+      const state = prompts[0]!;
+
+      // The shared gate lets Command Code JSON through; the provider parser owns the state check.
+      expect(submitManualLoginCode("command-code", callback(`${state}-other`))).toEqual({ ok: true });
+      await promptCount(2);
+      expect(whoamiKeys).toHaveLength(0);
+
+      // A "#" inside a JSON field must not be read as a code#state suffix.
+      expect(submitManualLoginCode("command-code", callback(state))).toEqual({ ok: true });
+      expect(await login).toMatchObject({ access: "sk-key#segment", accountId: "u-1", source: "oauth" });
+      expect(whoamiKeys).toEqual(["Bearer sk-key#segment"]);
+    } finally {
+      controller.abort(new Error("test complete"));
+      await settled;
+      globalThis.fetch = originalFetch;
+      loginState.delete("command-code");
+      clearManualCodeSlot("command-code");
+    }
+  });
+
+  test("the direct prompt rejects a raw key whose #state suffix does not match", async () => {
+    const controller = new AbortController();
+    const originalFetch = globalThis.fetch;
+    let whoamiCalls = 0;
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const href = String(input);
+      if (href.includes("whoami")) {
+        whoamiCalls += 1;
+        return new Response(JSON.stringify({ ok: true, user: { id: "u-1", userName: "tester" } }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch: ${href}`);
+    }) as typeof globalThis.fetch;
+    let prompts = 0;
+    try {
+      const login = loginCommandCode({
+        onAuth: () => {},
+        onProgress: () => {},
+        onManualCodeInput: async state => {
+          prompts += 1;
+          if (prompts === 1) return `sk-direct#${state}-other`;
+          controller.abort(new Error("cancelled after re-prompt"));
+          return undefined;
+        },
+        signal: controller.signal,
+      }, { importLocal: "off" });
+      await expect(login).rejects.toThrow("cancelled after re-prompt");
+      expect(prompts).toBe(2);
+      expect(whoamiCalls).toBe(0);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -642,7 +705,7 @@ describe("Command Code provider", () => {
     expect(commandCodeReasoningEfforts("meta/muse-spark-1.2-contributor")).toEqual(
       ["low", "medium", "high", "xhigh", "max"],
     );
-    // 1.3 shipped as the same-shaped successor and carries the identical ladder.
+    // The 2026-09-23 contributor profile lists four rungs, but /alpha/generate accepts max (200).
     expect(commandCodeReasoningEfforts("meta/muse-spark-1.3-contributor")).toEqual(
       ["low", "medium", "high", "xhigh", "max"],
     );
@@ -799,8 +862,8 @@ describe("Command Code provider", () => {
    * `modelReasoningEffortsAuthoritative` is never written by seeding, so its presence does.
    */
   test("an authoritative operator ladder reaches the wire", async () => {
-    // Shipped: deepseek/deepseek-v4.1-flash is ["high", "max"], so xhigh is aliased down to max.
-    expect(commandCodeReasoningEfforts("deepseek/deepseek-v4.1-flash")).toEqual(["high", "max"]);
+    // Shipped: deepseek/deepseek-v4.1-flash is ["low", "high", "max"], so xhigh aliases to max.
+    expect(commandCodeReasoningEfforts("deepseek/deepseek-v4.1-flash")).toEqual(["low", "high", "max"]);
     const shipped = await builtRequest({
       ...parsed("deepseek/deepseek-v4.1-flash"),
       options: { reasoning: "xhigh", maxOutputTokens: 100 },
@@ -904,17 +967,7 @@ describe("Command Code provider", () => {
     } finally { dispose(); }
   });
 
-  // Pins the profileUrl of each id added for #2647 — nothing more.
-  //
-  // Be clear about what this does NOT prove: the stubbed response below returns
-  // prose that commandcode.ai never actually emits, so a green run here is not
-  // evidence that a real profile page can be parsed. It cannot: the live pages
-  // carry no "Reasoning efforts ... are supported;" text at all (measured 0 for
-  // every row in the table on 2026-08-27), so the refresh path returns undefined
-  // in production. See the provenance note in command-code-efforts.ts.
-  //
-  // What it does catch is a typo'd or drifted profileUrl, which is worth pinning
-  // on its own: the URL is the only handle a future parser fix would have.
+  // Pin profile URLs independently of the payload parser.
   test("resolves the #2647 effort profiles to their canonical public URLs", async () => {
     const urls: string[] = [];
     const fetch = (async (url: string | URL | Request) => {
@@ -933,191 +986,110 @@ describe("Command Code provider", () => {
     ]);
   });
 
-  // Pins the CURRENT, BROKEN state of the profile-refresh path so nobody re-derives
-  /*
-   * Signal-light successor. The test this replaces ("a real profile page shape
-   * yields no efforts, so the row is not self-correcting") pinned the broken
-   * refresh path and told the reader to delete it once the parser could read a
-   * real payload - that parser now exists (parseCommandCodeProfileEfforts), so
-   * this is the replacement proof: a page-shaped flight payload heals a NEW
-   * model that has no seed row at all.
-   *
-   * deepseek/deepseek-v4-flash-fast is still unseeded (distinct from v4-flash;
-   * the live page declares [low, high, max] for it). Using an unseeded id keeps
-   * this proof independent of the seed table growing.
-   */
-  test("the embedded flight payload heals a new model's ladder without a seed row", async () => {
-    const flat = flightFlat(
-      "deepseek-v4-flash-fast",
-      "deepseek/deepseek-v4-flash-fast",
-      "DeepSeek V4 Flash Fast",
-      "DeepSeek",
-      "fast hybrid-attention reasoning",
-      { _157: 112, _113: 18 },
-      [flightRef("low"), flightRef("high"), flightRef("max")],
-      0.003, 0.26, 0.047, [], [flightRef("max")],
-    );
-    const fetch = (async () => new Response(flightPage(flat))) as typeof globalThis.fetch;
-
-    expect(commandCodeReasoningEfforts("deepseek/deepseek-v4-flash-fast")).toBeUndefined();
-    const refreshed = await refreshCommandCodeReasoningEfforts("deepseek/deepseek-v4-flash-fast", fetch);
-
-    expect(refreshed).toEqual(["low", "high", "max"]);
-    expect(commandCodeReasoningEfforts("deepseek/deepseek-v4-flash-fast")).toEqual(["low", "high", "max"]);
-  });
-
-  test("parseCommandCodeProfileEfforts decodes catalog rows, bare ids, and detail records without pollution", () => {
-    const flat = flightFlat(
-      // pricing noise before the first row: a whitelisted-word array whose
-      // nearest preceding string is NOT a model id must be dropped
-      "peak", 7, "offPeakHoursPerDay", 17, [flightRef("max")],
-      // catalog row with the URL-slug twin: the nearer real id must win
-      "deepseek-v4-1-flash",
-      "deepseek/deepseek-v4.1-flash",
-      "DeepSeek V4.1 Flash",
-      "DeepSeek",
-      "V4.1 hybrid-attention reasoning with vision",
-      { _157: 112 },
-      [flightRef("low"), flightRef("high"), flightRef("max")],
-      // bare-id catalog row (the /provider/v1/models shape)
-      "openai",
-      "gpt-5.6-luna",
-      "GPT-5.6 Luna",
-      "most capable OpenAI model",
-      { _157: 112 },
-      [flightRef("low"), flightRef("medium"), flightRef("high"), flightRef("xhigh"), flightRef("max")],
-      // detail record with an EMPTY ladder: nothing to merge, no entry
-      { _97: 98 },
-      "slug", "ling-3-0-flash-free", "id", "inclusionai/ling-3.0-flash-free", "name", "Ling 3.0 Flash",
-      "vendor", "inclusionAI", "category", "opensource", "blurb", "fast MoE work",
-      "contextWindow", 256000, "reasoning", true, "vision", "caps", { _157: 112 },
-      "reasoningEfforts", [],
-      "inputCost", 0,
-      // detail record with a real ladder owned by its nearest preceding id
-      "slug", "kimi-k3", "id", "moonshotai/Kimi-K3", "name", "Kimi K3",
-      "contextWindow", 1000000, "reasoning", true, "caps", { _157: 112 },
-      "reasoningEfforts", [flightRef("low"), flightRef("high"), flightRef("max")],
-    );
-
-    const parsed = parseCommandCodeProfileEfforts(flightPage(flat));
-
-    expect(parsed).toEqual({
-      "deepseek/deepseek-v4.1-flash": ["low", "high", "max"],
-      "gpt-5.6-luna": ["low", "medium", "high", "xhigh", "max"],
-      "moonshotai/Kimi-K3": ["low", "high", "max"],
-    });
-  });
-
-  test("parseCommandCodeProfileEfforts rejects pages without a flight payload", () => {
-    expect(parseCommandCodeProfileEfforts("Reasoning efforts high are supported; no other reasoning settings.")).toBeUndefined();
-    expect(parseCommandCodeProfileEfforts("<html>nothing embedded</html>")).toBeUndefined();
-  });
-
-  test("profile merges are additive: a page that lags reality never shrinks a measured ladder", async () => {
-    // muse-spark-1.2: the table carries the 2026-08-13 measured max tier; the
-    // page payload declares only four words. The union must keep all five.
-    const flat = flightFlat(
-      "meta/muse-spark-1.2", "Muse Spark 1.2", "desc", { _157: 112 },
-      [flightRef("low"), flightRef("medium"), flightRef("high"), flightRef("xhigh")],
-    );
-    const fetch = (async () => new Response(flightPage(flat))) as typeof globalThis.fetch;
-
-    const refreshed = await refreshCommandCodeReasoningEfforts("meta/muse-spark-1.2", fetch);
-
-    expect(refreshed).toEqual(["low", "medium", "high", "xhigh", "max"]);
-  });
-
-  test("profile merges add newly declared words in canonical order", async () => {
-    const flat = flightFlat(
-      "deepseek/deepseek-v4-flash", "DeepSeek V4 Flash", "desc", { _157: 112 },
-      [flightRef("low"), flightRef("high"), flightRef("max")],
-    );
-    const fetch = (async () => new Response(flightPage(flat))) as typeof globalThis.fetch;
-
-    const refreshed = await refreshCommandCodeReasoningEfforts("deepseek/deepseek-v4-flash", fetch);
-
-    expect(refreshed).toEqual(["low", "high", "max"]);
-  });
-
-  test("removeCommandCodeEffort drops a rejected word locally and the next merge restores it", async () => {
-    expect(removeCommandCodeEffort("deepseek/deepseek-v4-flash", "ultra"))
-      .toEqual(["high", "max"]); // unknown word: ladder unchanged
-    expect(removeCommandCodeEffort("DEEPSEEK/DEEPSEEK-V4-FLASH", "max"))
-      .toEqual(["high"]); // case-insensitive hit, word removed
-    expect(removeCommandCodeEffort("zai-org/no-such-model", "max")).toBeUndefined();
-
-    // The upstream 400 was transient: a page still declaring max puts it back.
-    const flat = flightFlat(
-      "deepseek/deepseek-v4-flash", "DeepSeek V4 Flash", "desc", { _157: 112 },
-      [flightRef("low"), flightRef("high"), flightRef("max")],
-    );
-    const fetch = (async () => new Response(flightPage(flat))) as typeof globalThis.fetch;
-    expect(await refreshCommandCodeReasoningEfforts("deepseek/deepseek-v4-flash", fetch))
-      .toEqual(["low", "high", "max"]);
-  });
-
-  test("ensureCommandCodeProfileCatalog is throttled and single-flight", async () => {
-    const flat = flightFlat(
-      "deepseek/deepseek-v4-flash-fast", "DeepSeek V4 Flash Fast", "desc", "DeepSeek", { _157: 112 },
-      [flightRef("low"), flightRef("high"), flightRef("max")],
-    );
-    let fetches = 0;
-    const fetch = (async (url: string | URL | Request) => {
-      fetches += 1;
-      expect(String(url)).toBe("https://commandcode.ai/models/deepseek-v4-flash");
-      return new Response(flightPage(flat));
-    }) as typeof globalThis.fetch;
-
-    expect(commandCodeReasoningEfforts("deepseek/deepseek-v4-flash-fast")).toBeUndefined();
-    expect(await ensureCommandCodeProfileCatalog(fetch)).toBe(true);
-    expect(commandCodeReasoningEfforts("deepseek/deepseek-v4-flash-fast")).toEqual(["low", "high", "max"]);
-
-    // Inside the throttle window: no second fetch, no change reported.
-    expect(await ensureCommandCodeProfileCatalog(fetch)).toBe(false);
-    expect(fetches).toBe(1);
-
-    // Concurrent callers share one in-flight attempt.
+  test("refreshes the requested model from a trimmed captured React Router payload", async () => {
+    // Remapped from .tmp/cc-audit/B/qwen3-8-flash.html (2026-09-23):
+    // _id and _reasoningEfforts point into the serialized string/value table.
+    const values = [
+      { _1: 2, _3: 4, _5: 6 }, "id", "Qwen/Qwen3.8-Flash", "reasoningEfforts",
+      [7, 8, 9], "slug", "qwen3-8-flash", "low", "medium", "xhigh",
+      { _1: 11, _3: 12 }, "unrelated/model", [13], "max",
+    ];
+    const page = `<script>window.__reactRouterContext.streamController.enqueue(${JSON.stringify(JSON.stringify(values))});</script>`;
+    const fetch = (async () => new Response(page)) as typeof globalThis.fetch;
+    expect(await refreshCommandCodeReasoningEfforts("Qwen/Qwen3.8-Flash", fetch))
+      .toEqual(["low", "medium", "high", "xhigh", "max"]);
+    expect(commandCodeReasoningEfforts("Qwen/Qwen3.8-Flash")).toEqual(["low", "medium", "high", "xhigh", "max"]);
     resetCommandCodeReasoningEffortsForTest();
-    let releaseResponse: (value: Response) => void = () => {};
-    const gate = new Promise<Response>(resolve => { releaseResponse = resolve; });
-    let slowFetches = 0;
-    const slowFetch = (async () => {
-      slowFetches += 1;
-      return gate;
-    }) as unknown as typeof globalThis.fetch;
-    const first = ensureCommandCodeProfileCatalog(slowFetch);
-    const second = ensureCommandCodeProfileCatalog(slowFetch);
-    releaseResponse(new Response(flightPage(flightFlat(
-      "deepseek/deepseek-v4-flash-fast", "DeepSeek V4 Flash Fast", "desc", "DeepSeek", { _157: 112 },
-      [flightRef("low"), flightRef("high"), flightRef("max")],
-    ))));
-    expect(await first).toBe(true);
-    expect(await second).toBe(true);
-    expect(slowFetches).toBe(1);
+
+    // Incomplete and conflicting records never replace the static row.
+    values[4] = [7, 99];
+    const malformed = `<script>window.__reactRouterContext.streamController.enqueue(${JSON.stringify(JSON.stringify(values))});</script>`;
+    expect(await refreshCommandCodeReasoningEfforts("Qwen/Qwen3.8-Flash", async () => new Response(malformed)))
+      .toBeUndefined();
+    expect(commandCodeReasoningEfforts("Qwen/Qwen3.8-Flash")).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    values[4] = [7, 8, 9];
+    values.push({ _1: 2, _3: 12 }, [7, 8]);
+    const ambiguous = `<script>window.__reactRouterContext.streamController.enqueue(${JSON.stringify(JSON.stringify(values))});</script>`;
+    expect(await refreshCommandCodeReasoningEfforts("Qwen/Qwen3.8-Flash", async () => new Response(ambiguous)))
+      .toBeUndefined();
   });
 
-  test("an unknown model request warms the profile catalog in the background", async () => {
-    const flat = flightFlat(
-      "inclusionai/ling-3.0-flash-sante:free", "Ling 3.0 Flash Sante", "desc", "inclusionAI", { _157: 112 },
-      [flightRef("low"), flightRef("high")],
-    );
-    let profileFetches = 0;
-    const fetch = (async (url: string | URL | Request) => {
-      if (String(url).includes("commandcode.ai/models/")) {
-        profileFetches += 1;
-        return new Response(flightPage(flat));
-      }
-      return new Response("{}", { status: 200 });
-    }) as typeof globalThis.fetch;
+  test("a payload record with two keys decoding to one field name is rejected", async () => {
+    const values = [
+      { _1: 2, _3: 4, _5: 6 }, "id", "Qwen/Qwen3.8-Flash", "reasoningEfforts", [8, 9], "id", "Qwen/Qwen3.8-Flash", "unused", "low", "high",
+    ];
+    // _1 and _5 both decode to "id": the record is not one this parser understands.
+    const page = `<script>window.__reactRouterContext.streamController.enqueue(${JSON.stringify(JSON.stringify(values))});</script>`;
+    expect(await refreshCommandCodeReasoningEfforts("Qwen/Qwen3.8-Flash", async () => new Response(page))).toBeUndefined();
+    expect(commandCodeReasoningEfforts("Qwen/Qwen3.8-Flash")).toEqual(["low", "medium", "high", "xhigh", "max"]);
+  });
 
-    expect(commandCodeReasoningEfforts("inclusionai/ling-3.0-flash-sante:free")).toBeUndefined();
-    const built = await createCommandCodeAdapter({ ...provider, fetch } as OcxProviderConfig)
-      .buildRequest({ ...parsed("inclusionai/ling-3.0-flash-sante:free"), options: { reasoning: "high", maxOutputTokens: 100 } });
-    // This request still goes out WITHOUT an effort (the ladder is not known yet).
-    expect(JSON.parse(built.body).params).not.toHaveProperty("reasoning_effort");
-    await new Promise(resolve => setTimeout(resolve, 0));
-    expect(profileFetches).toBe(1);
-    expect(commandCodeReasoningEfforts("inclusionai/ling-3.0-flash-sante:free")).toEqual(["low", "high"]);
+  test("reads a profile page larger than 256 KiB within the refresh bound", async () => {
+    const values = [{ _1: 2, _3: 4 }, "id", "Qwen/Qwen3.8-Flash", "reasoningEfforts", [5, 6], "low", "medium"];
+    const padding = "x".repeat(300 * 1024);
+    const page = `<html><!--${padding}--><script>window.__reactRouterContext.streamController.enqueue(${JSON.stringify(JSON.stringify(values))});</script></html>`;
+    expect(page.length).toBeGreaterThan(256 * 1024);
+    expect(page.length).toBeLessThan(PROFILE_PAGE_MAX_BYTES);
+    expect(await refreshCommandCodeReasoningEfforts("Qwen/Qwen3.8-Flash", async () => new Response(page)))
+      .toEqual(["low", "medium", "high", "xhigh", "max"]);
+  });
+
+  test("later profile refreshes do not reintroduce a previously rejected effort", async () => {
+    const page = "Reasoning efforts low, medium, high, xhigh, max are supported; no mapping.";
+    const fetch = (async () => new Response(page)) as typeof globalThis.fetch;
+    expect(await refreshCommandCodeReasoningEfforts("Qwen/Qwen3.8-Flash", fetch, "max"))
+      .toEqual(["low", "medium", "high", "xhigh"]);
+    expect(await refreshCommandCodeReasoningEfforts("qwen/qwen3.8-flash", fetch, "high"))
+      .toEqual(["low", "medium", "xhigh"]);
+    expect(commandCodeReasoningEfforts("Qwen/Qwen3.8-Flash")).toEqual(["low", "medium", "xhigh"]);
+    expect(await refreshCommandCodeReasoningEfforts("Qwen/Qwen3.8-Flash", async () => new Response("unavailable", { status: 503 }), "xhigh"))
+      .toBeUndefined();
+    expect(commandCodeReasoningEfforts("Qwen/Qwen3.8-Flash")).toEqual(["low", "medium"]);
+    resetCommandCodeReasoningEffortsForTest();
+    expect(await refreshCommandCodeReasoningEfforts("Qwen/Qwen3.8-Flash", fetch))
+      .toEqual(["low", "medium", "high", "xhigh", "max"]);
+  });
+
+  test("effort rejections stay scoped to the destination that observed them", async () => {
+    const modelId = "deepseek/deepseek-v4-flash";
+    const alternate = "https://alternate.example/command-code";
+    const fetch = (async () => new Response("Reasoning efforts high, max are supported; no mapping.")) as typeof globalThis.fetch;
+    expect(await refreshCommandCodeReasoningEfforts(modelId, fetch, "max", provider.baseUrl)).toEqual(["high"]);
+    expect(commandCodeReasoningEfforts(modelId, alternate)).toEqual(["high", "max"]);
+    const options = { reasoning: "max", maxOutputTokens: 100 };
+    const officialRequest = await createCommandCodeAdapter(provider).buildRequest({ ...parsed(modelId), options });
+    const alternateRequest = await createCommandCodeAdapter({ ...provider, baseUrl: alternate }).buildRequest({ ...parsed(modelId), options });
+    expect(JSON.parse(officialRequest.body).params).not.toHaveProperty("reasoning_effort");
+    expect(JSON.parse(alternateRequest.body).params.reasoning_effort).toBe("max");
+    expect(await refreshCommandCodeReasoningEfforts(modelId, fetch, "high", alternate)).toEqual(["max"]);
+    expect(commandCodeReasoningEfforts(modelId, provider.baseUrl)).toEqual(["high"]);
+  });
+
+  test("uses the 2026-09-23 profile ladders for newly cataloged models", async () => {
+    const cases: Array<[string, string[]]> = [
+      ["claude-fable-5-1", ["low", "medium", "high", "xhigh", "max"]],
+      ["claude-opus-5-5", ["low", "medium", "high", "xhigh", "max"]],
+      ["deepseek/deepseek-v4-flash-fast", ["low", "high", "max"]],
+      ["z-ai/glm-5.3-flashx", ["low", "high", "max"]],
+      ["Qwen/Qwen3.8-Omni-Flash", ["low", "medium", "xhigh"]],
+      ["Qwen/Qwen3.8-Max-0902", ["low", "medium", "xhigh"]],
+      ["stepfun/Step-5-Preview", ["low", "medium", "high"]],
+      ["tencent/hy4-preview", ["low", "medium", "high"]],
+      ["google/gemini-3.8-flash", ["low", "medium", "high"]],
+      ["xai/grok-4.7", ["low", "medium", "high", "xhigh"]],
+    ];
+    for (const [id, ladder] of cases) expect(commandCodeReasoningEfforts(id)).toEqual(ladder);
+    const urls: string[] = [];
+    const fetch = (async (url: string | URL | Request) => {
+      urls.push(String(url));
+      return new Response("", { status: 404 });
+    }) as typeof globalThis.fetch;
+    await refreshCommandCodeReasoningEfforts("meta/muse-spark-1.3", fetch);
+    await refreshCommandCodeReasoningEfforts("meta/muse-spark-1.3-contributor", fetch);
+    expect(urls).toEqual([
+      "https://commandcode.ai/models/muse-spark-1-3",
+      "https://commandcode.ai/models/muse-spark-1-3-contributor",
+    ]);
   });
 
   test("omits effort when the caller did not choose one", async () => {

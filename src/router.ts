@@ -1,6 +1,7 @@
 import type { CodexAccountMode, OcxConfig, OcxProviderConfig } from "./types";
 import { createHash } from "node:crypto";
 import { peekAuthStore } from "./oauth/store";
+import { resolveDevinApiBaseUrl, validateDevinApiBaseUrl } from "./oauth/devin/api-base";
 import {
   getCombo,
   isComboTargetInCooldown,
@@ -155,14 +156,21 @@ export function knownModelIdsForProvider(
     // This callback runs only for a scoped entry, not for each provider in an alias scan.
     const routed = routedProviderConfig(provName, prov);
     let key = routed.apiKey;
+    let destination = routed.baseUrl;
     if (routed.authMode === "oauth") {
       const set = peekAuthStore()[provName];
       const account = set?.accounts.find(row => row.id === set.activeAccountId);
       if (!account || account.needsReauth || !Number.isFinite(account.credential.expires)
         || account.credential.expires <= Date.now()) return undefined;
       key = account.credential.access;
+      if (routed.adapter === "devin") destination = validateDevinApiBaseUrl(account.credential.apiBaseUrl) ?? routed.baseUrl;
     }
-    return key ? createHash("sha256").update(key).digest("hex") : undefined;
+    if (!key) return undefined;
+    return createHash("sha256")
+      .update(routed.adapter === "devin"
+        ? JSON.stringify([key, resolveDevinApiBaseUrl(destination)])
+        : key)
+      .digest("hex");
   });
   for (const cached of cachedModels ?? []) ids.add(cached.id);
   for (const model of config?.customModels ?? []) {
@@ -343,6 +351,7 @@ export function routedProviderConfig(providerName: string, provider: OcxProvider
   const preserveReasoningContentModels = staticPolicy.preserveReasoningContentModels;
   const requiresReasoningPlaceholderModels = staticPolicy.requiresReasoningPlaceholderModels;
   const reasoningSplitModels = staticPolicy.reasoningSplitModels;
+  const inlineThinkTagModels = staticPolicy.inlineThinkTagModels;
   const reasoningDetailsModels = staticPolicy.reasoningDetailsModels;
   const thinkingToggleModels = staticPolicy.thinkingToggleModels;
   const thinkingBudgetModels = staticPolicy.thinkingBudgetModels;
@@ -492,6 +501,7 @@ export function routedProviderConfig(providerName: string, provider: OcxProvider
     ...(preserveReasoningContentModels ? { preserveReasoningContentModels } : {}),
     ...(requiresReasoningPlaceholderModels ? { requiresReasoningPlaceholderModels } : {}),
     ...(reasoningSplitModels ? { reasoningSplitModels } : {}),
+    ...(inlineThinkTagModels ? { inlineThinkTagModels } : {}),
     ...(reasoningDetailsModels ? { reasoningDetailsModels } : {}),
     ...(thinkingToggleModels ? { thinkingToggleModels } : {}),
     ...(thinkingBudgetModels ? { thinkingBudgetModels } : {}),

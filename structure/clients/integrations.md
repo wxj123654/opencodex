@@ -29,6 +29,14 @@ parsing and ownership rules below.
 | `src/integrations/mutation-plan.ts` | The shared observation both a preview and a mutation read, and the value-free plan an operator confirms. It owns no IO of its own, takes no lock, and must never import `writer.ts`. |
 | `src/integrations/store.ts` / `journal.ts` | One-root persistence for ownership records, operation history, snapshots, and retention maintenance. |
 
+## Cursor installed capability reads
+
+`src/integrations/cursor-effort-table.ts` reads the installed agent bundle through one regular-file
+handle, refuses final symlinks where supported, and caps bytes read even if the file grows after
+inspection. Failure retains the static-table fallback. Parsed content is cached by path, mtime and
+size; the returned table always uses the current install version, including on a cache hit.
+`tests/providers/cursor/cursor-effort-table.test.ts` covers cache reuse, version refresh and unsafe files.
+
 ## Data Flow
 
 ```text
@@ -309,6 +317,9 @@ admin token — or logs that it is degrading. Composing `http://127.0.0.1:<publi
 what produced a dead socket on a tailnet-bound hub in the first place.
 
 ## Aside profile ownership
+
+The local CLI sync shares one absolute deadline across listener attestation and the
+capability-bearing POST, even if the listener keeps sending partial bytes.
 
 Aside discovery projects only registered numeric account IDs, labels and current status. Catalog
 paths derive from the configured root/u/id, never from browser profilePath. Guarded filesystem
